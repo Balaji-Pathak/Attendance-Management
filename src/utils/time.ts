@@ -1,5 +1,13 @@
 import { AttendanceRecord, AttendanceStatus, Employee } from '../types/attendance';
 
+export function getBrowserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 export function getTodayISO(): string {
   const now = new Date();
   const y = now.getFullYear();
@@ -35,20 +43,35 @@ export function formatDisplayTime(hhmm: string | null): string {
   return `${String(hour12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${period}`;
 }
 
+export function parseDisplayTimeToHHMM(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const trimmed = String(input).trim();
+  if (!trimmed || trimmed === '—') return null;
+
+  const ampmMatch = trimmed.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (ampmMatch) {
+    let h = Number(ampmMatch[1]);
+    const m = Number(ampmMatch[2]);
+    const period = ampmMatch[3].toUpperCase();
+    if (period === 'PM' && h < 12) h += 12;
+    if (period === 'AM' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  const h24Match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (h24Match) {
+    return `${String(Number(h24Match[1])).padStart(2, '0')}:${h24Match[2]}`;
+  }
+
+  return null;
+}
+
 export function formatDurationHM(totalMinutes: number | null): string {
   if (totalMinutes === null || Number.isNaN(totalMinutes)) return '—';
   const safe = Math.max(0, Math.round(totalMinutes));
   const hrs = Math.floor(safe / 60);
   const mins = safe % 60;
   return `${hrs}h ${String(mins).padStart(2, '0')}m`;
-}
-
-export function formatDurationClock(totalMinutes: number | null): string {
-  if (totalMinutes === null || Number.isNaN(totalMinutes)) return '—';
-  const safe = Math.max(0, Math.round(totalMinutes));
-  const hrs = Math.floor(safe / 60);
-  const mins = safe % 60;
-  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
 }
 
 export interface ShiftCalculationResult {
@@ -60,11 +83,6 @@ export interface ShiftCalculationResult {
   status: AttendanceStatus;
 }
 
-/**
- * Computes gross shift duration, applies the standard 30-minute break deduction
- * (or custom breakMinutes), and derives net working minutes and decimal hours.
- * Supports overnight shifts where outTime < inTime by rolling over 24 hours.
- */
 export function calculateShiftMetrics(
   inTime: string,
   outTime: string,
@@ -114,11 +132,11 @@ export function getStatusLabel(status: AttendanceStatus | 'not_in'): string {
     case 'on_duty':
       return 'On Duty';
     case 'completed':
-      return 'Completed';
+      return 'Done';
     case 'short_shift':
       return 'Short Shift';
     case 'not_in':
-      return 'Not Checked In';
+      return 'Not In';
   }
 }
 
@@ -150,61 +168,11 @@ export function downloadCSV(filename: string, headers: string[], rows: (string |
 
 export function buildStarterEmployees(): Employee[] {
   return [
-    {
-      id: 'emp-101',
-      empCode: 'EMP-001',
-      name: 'Rajesh Kumar',
-      department: 'Production Floor',
-      role: 'Machine Operator',
-      shiftStart: '09:00',
-      shiftEnd: '18:00',
-      breakMinutes: 30,
-      active: true,
-    },
-    {
-      id: 'emp-102',
-      empCode: 'EMP-002',
-      name: 'Anita Sharma',
-      department: 'Quality Control',
-      role: 'QC Inspector',
-      shiftStart: '09:00',
-      shiftEnd: '18:00',
-      breakMinutes: 30,
-      active: true,
-    },
-    {
-      id: 'emp-103',
-      empCode: 'EMP-003',
-      name: 'Vikram Patel',
-      department: 'Warehouse & Dispatch',
-      role: 'Dispatch Supervisor',
-      shiftStart: '08:30',
-      shiftEnd: '17:30',
-      breakMinutes: 30,
-      active: true,
-    },
-    {
-      id: 'emp-104',
-      empCode: 'EMP-004',
-      name: 'Meena Verma',
-      department: 'Packaging Unit',
-      role: 'Line Lead',
-      shiftStart: '09:00',
-      shiftEnd: '18:00',
-      breakMinutes: 30,
-      active: true,
-    },
-    {
-      id: 'emp-105',
-      empCode: 'EMP-005',
-      name: 'Suresh Nair',
-      department: 'Maintenance',
-      role: 'Electrical Technician',
-      shiftStart: '09:00',
-      shiftEnd: '18:00',
-      breakMinutes: 30,
-      active: true,
-    },
+    { id: 'emp-101', empCode: 'EMP-001', name: 'Rajesh Kumar', department: 'Production', breakMinutes: 30, active: true },
+    { id: 'emp-102', empCode: 'EMP-002', name: 'Anita Sharma', department: 'Quality', breakMinutes: 30, active: true },
+    { id: 'emp-103', empCode: 'EMP-003', name: 'Vikram Patel', department: 'Dispatch', breakMinutes: 30, active: true },
+    { id: 'emp-104', empCode: 'EMP-004', name: 'Meena Verma', department: 'Packaging', breakMinutes: 30, active: true },
+    { id: 'emp-105', empCode: 'EMP-005', name: 'Suresh Nair', department: 'Maintenance', breakMinutes: 30, active: true },
   ];
 }
 

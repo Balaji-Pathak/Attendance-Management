@@ -6,7 +6,7 @@ interface EmployeesViewProps {
   employees: Employee[];
   onSaveEmployee: (employee: Employee, isNew: boolean) => Promise<void>;
   onToggleActive: (employee: Employee) => Promise<void>;
-  onLoadStarterRoster: () => void;
+  onLoadStarterRoster: () => Promise<void>;
 }
 
 export const EmployeesView: React.FC<EmployeesViewProps> = ({
@@ -30,10 +30,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         id: `emp-${Date.now()}`,
         empCode: code,
         name: '',
-        department: 'Production Floor',
-        role: 'Staff',
-        shiftStart: '09:00',
-        shiftEnd: '18:00',
+        department: 'Production',
         breakMinutes: 30,
         active: true,
       },
@@ -58,7 +55,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
           empCode: modalEmp.data.empCode.trim(),
           name: modalEmp.data.name.trim(),
           department: modalEmp.data.department.trim() || 'General',
-          role: modalEmp.data.role.trim() || 'Staff',
+          breakMinutes: 30,
         },
         modalEmp.isNew
       );
@@ -73,9 +70,9 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       <section className="rounded-xl border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 px-6 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">Employee Directory</h2>
+            <h2 className="text-base font-semibold text-slate-900">Employees</h2>
             <p className="mt-0.5 text-xs text-slate-500">
-              Each active employee automatically gets an individual attendance tab inside your Master Google Sheet.
+              Active employees appear immediately on Guard Uncle&apos;s gate screen and get an individual tab in Google Sheets.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
@@ -104,7 +101,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
           <div className="px-6 py-14 text-center">
             <p className="text-base font-semibold text-slate-900">No employees added yet</p>
             <p className="mt-1 text-sm text-slate-500">
-              Add employees with their shift timings and 30-minute break policy to begin gate tracking.
+              Add your staff members so they appear on the Guard Gate Desk.
             </p>
           </div>
         ) : (
@@ -112,12 +109,10 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/80 text-xs font-medium text-slate-500">
-                  <th className="px-6 py-3 whitespace-nowrap">Emp ID</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Full Name</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Department & Role</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Shift Hours</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Break Deduction</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Dedicated Sheet</th>
+                  <th className="px-6 py-3 whitespace-nowrap">Employee ID</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Name</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Department</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Individual Sheet</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-right whitespace-nowrap">Actions</th>
                 </tr>
@@ -132,13 +127,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                       {emp.name}
                     </td>
                     <td className="px-4 py-3.5 text-xs text-slate-600">
-                      {emp.department} · {emp.role}
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
-                      {emp.shiftStart} – {emp.shiftEnd}
-                    </td>
-                    <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
-                      {emp.breakMinutes} min
+                      {emp.department}
                     </td>
                     <td className="px-4 py-3.5 text-xs whitespace-nowrap">
                       {emp.individualSheetUrl ? (
@@ -187,7 +176,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         )}
       </section>
 
-      {/* Add/Edit Employee Modal */}
+      {/* Simplified Add/Edit Employee Modal */}
       {modalEmp && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
@@ -197,7 +186,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <h3 className="text-base font-semibold text-slate-900">
-                {modalEmp.isNew ? 'Add New Employee' : 'Edit Employee'}
+                {modalEmp.isNew ? 'Add Employee' : 'Edit Employee'}
               </h3>
               <button
                 type="button"
@@ -209,119 +198,57 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4 px-6 py-5">
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Emp ID</label>
-                  <input
-                    type="text"
-                    required
-                    value={modalEmp.data.empCode}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, empCode: e.target.value },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-slate-700">Full Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={modalEmp.data.name}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, name: e.target.value },
-                      })
-                    }
-                    placeholder="e.g., Rajesh Kumar"
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700">Employee ID</label>
+                <input
+                  type="text"
+                  required
+                  value={modalEmp.data.empCode}
+                  onChange={(e) =>
+                    setModalEmp({
+                      ...modalEmp,
+                      data: { ...modalEmp.data, empCode: e.target.value },
+                    })
+                  }
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
+                />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Department</label>
-                  <input
-                    type="text"
-                    value={modalEmp.data.department}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, department: e.target.value },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Role</label>
-                  <input
-                    type="text"
-                    value={modalEmp.data.role}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, role: e.target.value },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700">Full Name</label>
+                <input
+                  type="text"
+                  required
+                  value={modalEmp.data.name}
+                  onChange={(e) =>
+                    setModalEmp({
+                      ...modalEmp,
+                      data: { ...modalEmp.data, name: e.target.value },
+                    })
+                  }
+                  placeholder="e.g., Rajesh Kumar"
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Shift Start</label>
-                  <input
-                    type="time"
-                    value={modalEmp.data.shiftStart}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, shiftStart: e.target.value },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-2.5 py-2 font-mono text-sm tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Shift End</label>
-                  <input
-                    type="time"
-                    value={modalEmp.data.shiftEnd}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: { ...modalEmp.data, shiftEnd: e.target.value },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-2.5 py-2 font-mono text-sm tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">Break (min)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={180}
-                    value={modalEmp.data.breakMinutes}
-                    onChange={(e) =>
-                      setModalEmp({
-                        ...modalEmp,
-                        data: {
-                          ...modalEmp.data,
-                          breakMinutes: Number(e.target.value) || 0,
-                        },
-                      })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700">Department</label>
+                <input
+                  type="text"
+                  value={modalEmp.data.department}
+                  onChange={(e) =>
+                    setModalEmp({
+                      ...modalEmp,
+                      data: { ...modalEmp.data, department: e.target.value },
+                    })
+                  }
+                  placeholder="e.g., Production"
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-600">
+                Break policy: 30 minutes automatically deducted on every Check-Out.
               </div>
 
               <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">

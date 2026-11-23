@@ -6,7 +6,6 @@ import {
   downloadCSV,
   formatDisplayDate,
   formatDisplayTime,
-  formatDurationClock,
   formatDurationHM,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
@@ -45,9 +44,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         if (!q) return true;
         return (
           r.empCode.toLowerCase().includes(q) ||
-          r.empName.toLowerCase().includes(q) ||
-          r.department.toLowerCase().includes(q) ||
-          r.notes.toLowerCase().includes(q)
+          r.empName.toLowerCase().includes(q)
         );
       })
       .sort((a, b) => {
@@ -57,61 +54,38 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   }, [records, dateFilter, empFilter, statusFilter, search]);
 
   const totals = useMemo(() => {
-    let totalGross = 0;
     let totalBreak = 0;
     let totalNet = 0;
-    let completedCount = 0;
+    let pendingSync = 0;
 
     for (const r of filteredRecords) {
-      if (r.outTime && r.grossMinutes !== null && r.netMinutes !== null) {
-        totalGross += r.grossMinutes;
+      if (!r.syncedToSheet) pendingSync += 1;
+      if (r.outTime && r.netMinutes !== null) {
         totalBreak += r.breakMinutes;
         totalNet += r.netMinutes;
-        completedCount += 1;
       }
     }
 
     return {
       entries: filteredRecords.length,
-      completedCount,
-      totalGross,
       totalBreak,
       totalNet,
+      totalNetDecimal: Number((totalNet / 60).toFixed(2)),
+      pendingSync,
     };
   }, [filteredRecords]);
 
   const handleExportCSV = () => {
     downloadCSV(
       `master-attendance${dateFilter ? `-${dateFilter}` : ''}.csv`,
-      [
-        'Date',
-        'Employee ID',
-        'Employee Name',
-        'Department',
-        'In Time',
-        'Out Time',
-        'Gross (mins)',
-        'Break Deducted (mins)',
-        'Net Hours (HH:MM)',
-        'Net Decimal',
-        'Status',
-        'Marked By',
-        'Notes',
-      ],
+      ['Date', 'Employee ID', 'Name', 'In Time', 'Out Time', 'Working Hours'],
       filteredRecords.map((r) => [
         r.date,
         r.empCode,
         r.empName,
-        r.department,
-        r.inTime,
-        r.outTime ?? '',
-        r.grossMinutes ?? '',
-        r.outTime ? r.breakMinutes : '',
-        r.netMinutes !== null ? formatDurationClock(r.netMinutes) : '',
-        r.netDecimalHours ?? '',
-        r.status,
-        r.markedBy,
-        r.notes,
+        formatDisplayTime(r.inTime),
+        r.outTime ? formatDisplayTime(r.outTime) : '',
+        r.netDecimalHours !== null ? r.netDecimalHours : '',
       ])
     );
   };
@@ -121,32 +95,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
     if (!editing) return;
     setSavingEdit(true);
     try {
-      let nextRecord = { ...editing, updatedAt: new Date().toISOString(), syncedToSheet: false };
-      if (editing.outTime) {
-        const calc = calculateShiftMetrics(
-          editing.inTime,
-          editing.outTime,
-          editing.breakMinutes
-        );
-        nextRecord = {
-          ...nextRecord,
-          grossMinutes: calc.grossMinutes,
-          breakMinutes: calc.breakDeductedMinutes,
-          netMinutes: calc.netMinutes,
-          netDecimalHours: calc.netDecimalHours,
-          status: calc.status,
-        };
-      } else {
-        nextRecord = {
-          ...nextRecord,
-          outTime: null,
-          grossMinutes: null,
-          netMinutes: null,
-          netDecimalHours: null,
-          status: 'on_duty',
-        };
-      }
-      await onUpdateRecord(nextRecord);
+      await onUpdateRecord(editing);
       setEditing(null);
     } finally {
       setSavingEdit(false);
@@ -163,32 +112,32 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       {/* Summary Strip */}
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Filtered Entries</div>
+          <div className="text-xs font-medium text-slate-500">Entries Shown</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
             {totals.entries}
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Total Gross Hours</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
-            {formatDurationHM(totals.totalGross)}
-          </div>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Total Break Deducted</div>
+          <div className="text-xs font-medium text-slate-500">Break Deducted</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
             {formatDurationHM(totals.totalBreak)}
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Total Net Working Hours</div>
+          <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
-            {formatDurationHM(totals.totalNet)}
+            {totals.totalNetDecimal.toFixed(2)}h
+          </div>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+          <div className="text-xs font-medium text-slate-500">Pending Sheet Sync</div>
+          <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
+            {totals.pendingSync}
           </div>
         </div>
       </section>
 
-      {/* Filters & Actions */}
+      {/* Filters & Table */}
       <section className="rounded-xl border border-slate-200 bg-white">
         <div className="flex flex-col gap-4 border-b border-slate-200 px-6 py-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex flex-wrap items-center gap-3">
@@ -198,8 +147,8 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name, ID, notes..."
-                className="w-56 rounded-lg border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-700 focus:bg-white focus:outline-none"
+                placeholder="Search name or ID..."
+                className="w-52 rounded-lg border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-700 focus:bg-white focus:outline-none"
               />
             </div>
 
@@ -242,7 +191,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
             >
               <option value="all">All Statuses</option>
               <option value="on_duty">On Duty</option>
-              <option value="completed">Completed</option>
+              <option value="completed">Done</option>
               <option value="short_shift">Short Shift</option>
             </select>
           </div>
@@ -252,7 +201,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               type="button"
               onClick={handleExportCSV}
               disabled={filteredRecords.length === 0}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <Download className="h-3.5 w-3.5" />
               <span>Export CSV</span>
@@ -261,10 +210,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               <button
                 type="button"
                 onClick={onRequestSyncAll}
-                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                <span>Sync Master & Employee Tabs</span>
+                <span>Sync to Google Sheet</span>
               </button>
             )}
           </div>
@@ -273,10 +222,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         {filteredRecords.length === 0 ? (
           <div className="px-6 py-14 text-center">
             <p className="text-base font-semibold text-slate-900">
-              No attendance logs found
+              No attendance logs yet
             </p>
             <p className="mt-1 text-sm text-slate-500">
-              Guard check-ins and check-outs will appear here automatically with calculated net working hours.
+              Entries marked by Guard Uncle on the Guard Gate Desk appear here automatically.
             </p>
           </div>
         ) : (
@@ -285,15 +234,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/80 text-xs font-medium text-slate-500">
                   <th className="px-6 py-3 whitespace-nowrap">Date</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Employee</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Employee ID</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Name</th>
                   <th className="px-4 py-3 whitespace-nowrap">In Time</th>
                   <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Gross</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Break</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Net Hours</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours (-30m)</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
-                  <th className="px-4 py-3 whitespace-nowrap">Guard / Notes</th>
-                  <th className="px-6 py-3 text-right whitespace-nowrap">Actions</th>
+                  <th className="px-6 py-3 text-right whitespace-nowrap">Admin</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -302,23 +249,17 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                     <td className="px-6 py-3.5 font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
                       {rec.date}
                     </td>
-                    <td className="px-4 py-3.5">
-                      <div className="font-medium text-slate-900">{rec.empName}</div>
-                      <div className="text-xs text-slate-500">
-                        {rec.empCode} · {rec.department}
-                      </div>
+                    <td className="px-4 py-3.5 font-mono text-xs font-medium text-slate-700 tabular-nums whitespace-nowrap">
+                      {rec.empCode}
+                    </td>
+                    <td className="px-4 py-3.5 font-medium text-slate-900 whitespace-nowrap">
+                      {rec.empName}
                     </td>
                     <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
                       {formatDisplayTime(rec.inTime)}
                     </td>
                     <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
                       {rec.outTime ? formatDisplayTime(rec.outTime) : '—'}
-                    </td>
-                    <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
-                      {formatDurationHM(rec.grossMinutes)}
-                    </td>
-                    <td className="px-4 py-3.5 text-right font-mono text-xs text-amber-700 tabular-nums whitespace-nowrap">
-                      {rec.outTime ? `-${rec.breakMinutes}m` : '—'}
                     </td>
                     <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap">
                       {rec.netMinutes !== null
@@ -327,10 +268,6 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                     </td>
                     <td className="px-4 py-3.5 whitespace-nowrap">
                       <StatusLabel status={rec.status} />
-                    </td>
-                    <td className="px-4 py-3.5 text-xs text-slate-600 max-w-[200px] truncate">
-                      <span>{rec.markedBy}</span>
-                      {rec.notes && <span className="text-slate-400"> · {rec.notes}</span>}
                     </td>
                     <td className="px-6 py-3.5 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
@@ -360,7 +297,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         )}
       </section>
 
-      {/* Edit Attendance Record Modal */}
+      {/* Admin Edit Correction Modal */}
       {editing && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
@@ -370,7 +307,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
-                <h3 className="text-base font-semibold text-slate-900">Edit Attendance Entry</h3>
+                <h3 className="text-base font-semibold text-slate-900">Admin Time Correction</h3>
                 <p className="mt-0.5 text-xs text-slate-500">
                   {editing.empCode} · {editing.empName} · {formatDisplayDate(editing.date)}
                 </p>
@@ -440,23 +377,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               {editPreview && (
                 <div className="rounded-lg border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs flex items-center justify-between">
                   <span className="text-slate-700">
-                    Gross {formatDurationHM(editPreview.grossMinutes)} − {editPreview.breakDeductedMinutes}m break
+                    Break -{editPreview.breakDeductedMinutes}m applied
                   </span>
                   <span className="font-mono font-semibold text-teal-900 tabular-nums">
-                    Net: {formatDurationHM(editPreview.netMinutes)}
+                    Working Hours: {editPreview.netDecimalHours.toFixed(2)}h
                   </span>
                 </div>
               )}
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700">Notes</label>
-                <input
-                  type="text"
-                  value={editing.notes}
-                  onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
-                  className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-              </div>
 
               <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
                 <button

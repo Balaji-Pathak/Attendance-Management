@@ -12,9 +12,6 @@ export interface Employee {
   empCode: string;
   name: string;
   department: string;
-  role: string;
-  shiftStart: string; // HH:MM (24h)
-  shiftEnd: string; // HH:MM (24h)
   breakMinutes: number; // Defaults to 30
   active: boolean;
   individualSheetId?: string;
@@ -27,18 +24,22 @@ export interface AttendanceRecord {
   empId: string;
   empCode: string;
   empName: string;
-  department: string;
   inTime: string; // HH:MM (24h)
   outTime: string | null; // HH:MM (24h) or null if still on duty
   grossMinutes: number | null;
-  breakMinutes: number; // Deducted break minutes (default 30)
+  breakMinutes: number; // Deducted break minutes (30)
   netMinutes: number | null;
   netDecimalHours: number | null;
   status: AttendanceStatus;
-  markedBy: string;
-  notes: string;
   syncedToSheet: boolean;
   updatedAt: string;
+}
+
+export interface GateEmployeeView {
+  id: string;
+  empCode: string;
+  name: string;
+  department: string;
 }
 
 export interface SheetConfig {
@@ -64,4 +65,10 @@ export interface ConfirmRequest {
   confirmLabel: string;
   destructive?: boolean;
   onConfirm: () => Promise<void> | void;
+}
+
+export interface AdminAuthStatus {
+  hasEnvPasscode: boolean;
+  isAdminClaimed: boolean;
+  adminEmail: string | null;
 }

@@ -5,25 +5,29 @@ import {
   ClipboardList,
   ExternalLink,
   FileSpreadsheet,
+  Lock,
   Menu,
   ShieldCheck,
+  Unlock,
   Users,
   UserSquare2,
   X,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import {
+  AdminAuthStatus,
   AttendanceRecord,
   ConfirmRequest,
   DriveSpreadsheetItem,
   Employee,
+  GateEmployeeView,
   NavSection,
   SheetConfig,
 } from './types/attendance';
 import {
-  buildStarterEmployees,
-  calculateShiftMetrics,
+  getBrowserTimeZone,
   getEmployeeSheetTabName,
+  getTodayISO,
   sortRecordsNewestFirst,
 } from './utils/time';
 import {
@@ -42,95 +46,154 @@ import {
   syncEmployeeAndMasterTabs,
   syncFullWorkbook,
 } from './services/googleSheets';
-import { GoogleSignInButton } from './components/GoogleSignInButton';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { AdminAuthGate } from './components/AdminAuthGate';
 import { GuardGateView } from './components/GuardGateView';
 import { MasterAttendanceView } from './components/MasterAttendanceView';
 import { IndividualEmployeeView } from './components/IndividualEmployeeView';
 import { EmployeesView } from './components/EmployeesView';
 import { GoogleSheetsSyncView } from './components/GoogleSheetsSyncView';
 
-const STORAGE_EMPLOYEES_KEY = 'gatelog_employees_v1';
-const STORAGE_RECORDS_KEY = 'gatelog_records_v1';
-const STORAGE_SHEET_ID_KEY = 'gatelog_sheet_id_v1';
-const STORAGE_GUARD_NAME_KEY = 'gatelog_guard_name_v1';
-
 interface NoticeState {
   type: 'success' | 'error' | 'info';
   message: string;
 }
 
-const NAV_ITEMS: Array<{ id: NavSection; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'guard-gate', label: 'Guard Gate Desk', icon: ShieldCheck },
-  { id: 'master-log', label: 'Master Attendance', icon: ClipboardList },
-  { id: 'individual-sheets', label: 'Individual Sheets', icon: UserSquare2 },
-  { id: 'employees', label: 'Employees', icon: Users },
-  { id: 'sheets-sync', label: 'Google Sheets Sync', icon: FileSpreadsheet },
+const NAV_ITEMS: Array<{
+  id: NavSection;
+  label: string;
+  adminOnly: boolean;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'guard-gate', label: 'Guard Gate Desk', adminOnly: false, icon: ShieldCheck },
+  { id: 'master-log', label: 'Master Attendance', adminOnly: true, icon: ClipboardList },
+  { id: 'individual-sheets', label: 'Individual Sheets', adminOnly: true, icon: UserSquare2 },
+  { id: 'employees', label: 'Employees', adminOnly: true, icon: Users },
+  { id: 'sheets-sync', label: 'Google Sheets Sync', adminOnly: true, icon: FileSpreadsheet },
 ];
 
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavSection>('guard-gate');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Auth state (token stays strictly in memory inside firebaseAuth.ts)
-  const [user, setUser] = useState<User | null>(null);
-  const [needsAuth, setNeedsAuth] = useState<boolean>(true);
-  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
-
-  // Domain state
-  const [employees, setEmployees] = useState<Employee[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_EMPLOYEES_KEY);
-      return raw ? (JSON.parse(raw) as Employee[]) : [];
-    } catch {
-      return [];
-    }
+  // Admin server-verified Bearer token (strictly in React memory, never in localStorage)
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [adminAuthStatus, setAdminAuthStatus] = useState<AdminAuthStatus>({
+    hasEnvPasscode: false,
+    isAdminClaimed: false,
+    adminEmail: null,
   });
 
-  const [records, setRecords] = useState<AttendanceRecord[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_RECORDS_KEY);
-      return raw ? (JSON.parse(raw) as AttendanceRecord[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Google Workspace OAuth state (token strictly in memory in firebaseAuth.ts)
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [hasGoogleToken, setHasGoogleToken] = useState<boolean>(false);
+  const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
 
-  const [guardName, setGuardName] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_GUARD_NAME_KEY) || 'Guard Uncle';
-  });
+  // Public Guard state (from /api/gate/status)
+  const [gateEmployees, setGateEmployees] = useState<GateEmployeeView[]>([]);
+  const [todayRecords, setTodayRecords] = useState<AttendanceRecord[]>([]);
+  const [serverDate, setServerDate] = useState<string>(() => getTodayISO());
 
-  // Google Sheets state
+  // Protected Admin state (from /api/admin/state)
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [sheetConfig, setSheetConfig] = useState<SheetConfig | null>(null);
   const [driveFiles, setDriveFiles] = useState<DriveSpreadsheetItem[]>([]);
   const [loadingDriveFiles, setLoadingDriveFiles] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Feedback & Confirmation Modal
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
 
-  // Persist domain state locally
+  const browserTz = getBrowserTimeZone();
+
+  const fetchGateStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/gate/status?tz=${encodeURIComponent(browserTz)}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        serverDate: string;
+        employees: GateEmployeeView[];
+        todayRecords: AttendanceRecord[];
+      };
+      setServerDate(data.serverDate);
+      setGateEmployees(data.employees);
+      setTodayRecords(data.todayRecords);
+    } catch {
+      // Ignore transient network errors on background poll
+    }
+  }, [browserTz]);
+
+  const fetchAdminAuthStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/auth-status');
+      if (!res.ok) return;
+      const data = (await res.json()) as AdminAuthStatus;
+      setAdminAuthStatus(data);
+    } catch {
+      // Ignore transient errors
+    }
+  }, []);
+
+  const fetchAdminState = useCallback(
+    async (tokenOverride?: string) => {
+      const token = tokenOverride ?? adminToken;
+      if (!token) return;
+      const res = await fetch('/api/admin/state', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        setAdminToken(null);
+        return;
+      }
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        employees: Employee[];
+        records: AttendanceRecord[];
+        sheetConfig: SheetConfig | null;
+      };
+      setEmployees(data.employees);
+      setRecords(sortRecordsNewestFirst(data.records));
+      setSheetConfig(data.sheetConfig);
+    },
+    [adminToken]
+  );
+
+  // Initial load + 15s sync poll so Guard sees new employees and Admin sees live guard marks
   useEffect(() => {
-    localStorage.setItem(STORAGE_EMPLOYEES_KEY, JSON.stringify(employees));
-  }, [employees]);
+    fetchGateStatus();
+    fetchAdminAuthStatus();
+    const interval = setInterval(() => {
+      fetchGateStatus();
+      if (adminToken) {
+        fetchAdminState();
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [fetchGateStatus, fetchAdminAuthStatus, fetchAdminState, adminToken]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_RECORDS_KEY, JSON.stringify(records));
-  }, [records]);
+    const unsubscribe = initAuth(
+      (authedUser) => {
+        setGoogleUser(authedUser);
+        setHasGoogleToken(Boolean(getAccessToken()));
+      },
+      (maybeUser) => {
+        setGoogleUser(maybeUser);
+        setHasGoogleToken(false);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_GUARD_NAME_KEY, guardName);
-  }, [guardName]);
-
-  const handleApiError = useCallback((err: unknown, fallbackMsg: string) => {
+  const handleGoogleError = useCallback((err: unknown, fallbackMsg: string) => {
     const errorObj = err as Error & { status?: number };
     if (errorObj?.status === 401) {
       clearCachedToken();
-      setNeedsAuth(true);
+      setHasGoogleToken(false);
       setNotice({
         type: 'error',
-        message: 'Google session expired. Please sign in with Google again to continue syncing.',
+        message: 'Google session expired. Please sign in with Google again.',
       });
       return;
     }
@@ -140,118 +203,213 @@ export default function App() {
     });
   }, []);
 
-  const refreshDriveFiles = useCallback(async (tokenOverride?: string) => {
-    const token = tokenOverride || getAccessToken();
-    if (!token) return;
-    setLoadingDriveFiles(true);
-    try {
-      const files = await listAppSpreadsheets(token);
-      setDriveFiles(files);
-    } catch (err) {
-      handleApiError(err, 'Failed to list spreadsheets from Google Drive.');
-    } finally {
-      setLoadingDriveFiles(false);
-    }
-  }, [handleApiError]);
-
-  const connectSpreadsheet = useCallback(
-    async (idOrUrl: string, tokenOverride?: string, loadDataIntoApp = false) => {
+  const refreshDriveFiles = useCallback(
+    async (tokenOverride?: string) => {
       const token = tokenOverride || getAccessToken();
-      if (!token) {
-        setNeedsAuth(true);
-        return;
-      }
-      const spreadsheetId = extractSpreadsheetId(idOrUrl);
-      setIsSyncing(true);
+      if (!token) return;
+      setLoadingDriveFiles(true);
       try {
-        const loaded = await loadWorkbookData(token, spreadsheetId);
-        setSheetConfig(loaded.config);
-        localStorage.setItem(STORAGE_SHEET_ID_KEY, loaded.config.spreadsheetId);
-
-        if (loadDataIntoApp) {
-          if (loaded.employees.length > 0) {
-            setEmployees(loaded.employees);
-          }
-          if (loaded.records.length > 0) {
-            setRecords(sortRecordsNewestFirst(loaded.records));
-          }
-          setNotice({
-            type: 'success',
-            message: `Loaded ${loaded.employees.length} employees and ${loaded.records.length} attendance records from "${loaded.config.spreadsheetTitle}".`,
-          });
-        } else {
-          setNotice({
-            type: 'success',
-            message: `Connected to Google Sheet "${loaded.config.spreadsheetTitle}".`,
-          });
-        }
+        const files = await listAppSpreadsheets(token);
+        setDriveFiles(files);
       } catch (err) {
-        handleApiError(err, 'Could not connect to the specified Google Spreadsheet.');
+        handleGoogleError(err, 'Failed to list spreadsheets from Google Drive.');
       } finally {
-        setIsSyncing(false);
+        setLoadingDriveFiles(false);
       }
     },
-    [handleApiError]
+    [handleGoogleError]
   );
 
-  useEffect(() => {
-    const unsubscribe = initAuth(
-      (authedUser, token) => {
-        setUser(authedUser);
-        setNeedsAuth(false);
-        refreshDriveFiles(token);
-        const savedSheetId = localStorage.getItem(STORAGE_SHEET_ID_KEY);
-        if (savedSheetId && !sheetConfig) {
-          connectSpreadsheet(savedSheetId, token, false);
-        }
-      },
-      (maybeUser) => {
-        setUser(maybeUser);
-        setNeedsAuth(true);
-      }
-    );
-    return () => unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // ============================================================================
+  // GUARD ACTIONS (No login required, server enforces live time & 30m break)
+  // ============================================================================
+  const handleGuardMarkIn = async (empId: string) => {
+    const res = await fetch('/api/gate/mark-in', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ empId, tz: browserTz }),
+    });
+    const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+    if (!res.ok) {
+      setNotice({ type: 'error', message: body.error || 'Could not mark check-in.' });
+      return;
+    }
+    await fetchGateStatus();
+    if (adminToken) await fetchAdminState();
+    setNotice({
+      type: 'success',
+      message: `Marked IN: ${body.record?.empName} at ${body.record?.inTime}.`,
+    });
+  };
 
-  const handleGoogleLogin = async () => {
-    setIsLoggingIn(true);
+  const handleGuardMarkOut = async (recordId: string) => {
+    const res = await fetch('/api/gate/mark-out', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recordId, tz: browserTz }),
+    });
+    const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+    if (!res.ok) {
+      setNotice({ type: 'error', message: body.error || 'Could not mark check-out.' });
+      return;
+    }
+    await fetchGateStatus();
+    if (adminToken) await fetchAdminState();
+    setNotice({
+      type: 'success',
+      message: `Marked OUT: ${body.record?.empName} (${body.record?.netDecimalHours?.toFixed(2)}h after 30m break).`,
+    });
+  };
+
+  // ============================================================================
+  // ADMIN AUTH ACTIONS
+  // ============================================================================
+  const handleSetupPassword = async (password: string) => {
+    const res = await fetch('/api/admin/setup-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    const body = (await res.json()) as { token?: string; error?: string };
+    if (!res.ok || !body.token) {
+      throw new Error(body.error || 'Could not set Admin password.');
+    }
+    setAdminToken(body.token);
+    await fetchAdminAuthStatus();
+    await fetchAdminState(body.token);
+    setNotice({
+      type: 'success',
+      message: 'Admin password saved and Admin panel unlocked.',
+    });
+  };
+
+  const handlePasswordLogin = async (password: string) => {
+    const res = await fetch('/api/admin/login-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    const body = (await res.json()) as { token?: string; error?: string };
+    if (!res.ok || !body.token) {
+      throw new Error(body.error || 'Incorrect Admin password.');
+    }
+    setAdminToken(body.token);
+    await fetchAdminState(body.token);
+    setNotice({
+      type: 'success',
+      message: 'Admin panel unlocked.',
+    });
+  };
+
+  const handleGoogleAdminLogin = async () => {
+    setIsLoggingInGoogle(true);
     setNotice(null);
     try {
-      const { user: authedUser, accessToken } = await googleSignIn();
-      setUser(authedUser);
-      setNeedsAuth(false);
-      await refreshDriveFiles(accessToken);
+      const { user: authedUser, accessToken, idToken } = await googleSignIn();
+      setGoogleUser(authedUser);
+      setHasGoogleToken(true);
 
-      const savedSheetId = localStorage.getItem(STORAGE_SHEET_ID_KEY);
-      if (savedSheetId) {
-        await connectSpreadsheet(savedSheetId, accessToken, false);
-      } else {
+      const res = await fetch('/api/admin/google-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      const body = (await res.json()) as { token?: string; error?: string };
+      if (!res.ok || !body.token) {
         setNotice({
-          type: 'success',
-          message: `Signed in as ${authedUser.email}. Create or select your Master Attendance Sheet in Google Sheets Sync.`,
+          type: 'error',
+          message: body.error || 'This Google account is not authorized as Admin.',
         });
+        return;
       }
+
+      setAdminToken(body.token);
+      await fetchAdminAuthStatus();
+      await fetchAdminState(body.token);
+      await refreshDriveFiles(accessToken);
+      setNotice({
+        type: 'success',
+        message: `Admin unlocked via ${authedUser.email}.`,
+      });
     } catch (err) {
-      handleApiError(err, 'Google sign-in failed or was cancelled.');
+      handleGoogleError(err, 'Google sign-in failed or was cancelled.');
     } finally {
-      setIsLoggingIn(false);
+      setIsLoggingInGoogle(false);
     }
+  };
+
+  const handleConnectGoogleForSheetsOnly = async () => {
+    setIsLoggingInGoogle(true);
+    try {
+      const { user: authedUser, accessToken } = await googleSignIn();
+      setGoogleUser(authedUser);
+      setHasGoogleToken(true);
+      await refreshDriveFiles(accessToken);
+      setNotice({
+        type: 'success',
+        message: `Connected Google Sheets as ${authedUser.email}.`,
+      });
+    } catch (err) {
+      handleGoogleError(err, 'Google sign-in failed.');
+    } finally {
+      setIsLoggingInGoogle(false);
+    }
+  };
+
+  const handleLockAdmin = () => {
+    setAdminToken(null);
+    setActiveNav('guard-gate');
+    setNotice({
+      type: 'info',
+      message: 'Admin panel locked. Guard Gate Desk remains open.',
+    });
   };
 
   const handleGoogleLogout = async () => {
     await logout();
-    setUser(null);
-    setNeedsAuth(true);
+    setGoogleUser(null);
+    setHasGoogleToken(false);
     setDriveFiles([]);
-    setSheetConfig(null);
-    setNotice({
-      type: 'info',
-      message: 'Signed out of Google Workspace.',
+    setNotice({ type: 'info', message: 'Disconnected Google Workspace account.' });
+  };
+
+  const handleChangeAdminPassword = async (newPassword: string) => {
+    if (!adminToken) return;
+    const res = await fetch('/api/admin/change-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ newPassword }),
+    });
+    const body = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      setNotice({ type: 'error', message: body.error || 'Failed to update password.' });
+      return;
+    }
+    await fetchAdminAuthStatus();
+    setNotice({ type: 'success', message: 'Admin password updated.' });
+  };
+
+  // ============================================================================
+  // ADMIN DATA & GOOGLE SHEETS MUTATIONS
+  // ============================================================================
+  const persistSheetConfigOnServer = async (
+    cfg: SheetConfig | null,
+    markSynced = false
+  ) => {
+    if (!adminToken) return;
+    await fetch('/api/admin/sheet-config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ sheetConfig: cfg, markSynced }),
     });
   };
 
-  // Helper to sync one employee + master to connected sheet
   const syncOneEmployeeAndMaster = async (
     employee: Employee,
     nextEmployees: Employee[],
@@ -270,134 +428,131 @@ export default function App() {
       );
       setSheetConfig(updatedCfg);
       setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
+      await persistSheetConfigOnServer(updatedCfg, true);
     } catch (err) {
-      handleApiError(err, 'Saved locally, but Google Sheets sync failed.');
+      handleGoogleError(err, 'Saved in server, but Google Sheets sync failed.');
     } finally {
       setIsSyncing(false);
     }
   };
 
-  // Guard Gate Actions (already confirmed inside GuardGateView's confirmation dialog)
-  const handleMarkCheckIn = async ({
-    employee,
-    date,
-    inTime,
-    markedBy,
-    notes,
-  }: {
-    employee: Employee;
-    date: string;
-    inTime: string;
-    markedBy: string;
-    notes: string;
-  }) => {
-    const newRecord: AttendanceRecord = {
-      id: `att-${Date.now()}`,
-      date,
-      empId: employee.id,
-      empCode: employee.empCode,
-      empName: employee.name,
-      department: employee.department,
-      inTime,
-      outTime: null,
-      grossMinutes: null,
-      breakMinutes: employee.breakMinutes ?? 30,
-      netMinutes: null,
-      netDecimalHours: null,
-      status: 'on_duty',
-      markedBy,
-      notes,
-      syncedToSheet: false,
-      updatedAt: new Date().toISOString(),
+  const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
+    if (!adminToken) return;
+
+    const saveToServer = async () => {
+      const res = await fetch('/api/admin/employees', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify(emp),
+      });
+      const body = (await res.json()) as { employees?: Employee[]; error?: string };
+      if (!res.ok || !body.employees) {
+        throw new Error(body.error || 'Failed to save employee.');
+      }
+      setEmployees(body.employees);
+      await fetchGateStatus();
+      return body.employees;
     };
 
-    const nextRecords = sortRecordsNewestFirst([newRecord, ...records]);
-    setRecords(nextRecords);
-
     if (sheetConfig && getAccessToken()) {
-      await syncOneEmployeeAndMaster(employee, employees, nextRecords);
-      setNotice({
-        type: 'success',
-        message: `Checked in ${employee.name} at ${inTime} and synced to Google Sheets.`,
+      setConfirmRequest({
+        title: isNew ? 'Add Employee & Create Sheet Tab?' : 'Update Employee in Google Sheets?',
+        description: isNew
+          ? `Add ${emp.name} (${emp.empCode}) and create their individual sheet tab in "${sheetConfig.spreadsheetTitle}".`
+          : `Save changes for ${emp.name} (${emp.empCode}) and update Google Sheets.`,
+        affectedTarget: sheetConfig.spreadsheetTitle,
+        details: [
+          'Updates Employees tab',
+          `Updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
+        ],
+        confirmLabel: isNew ? 'Add & Sync' : 'Save & Sync',
+        onConfirm: async () => {
+          const nextEmps = await saveToServer();
+          await syncOneEmployeeAndMaster(emp, nextEmps, records);
+          setNotice({
+            type: 'success',
+            message: `${isNew ? 'Added' : 'Updated'} ${emp.name} and synced to Google Sheets.`,
+          });
+        },
       });
     } else {
+      await saveToServer();
       setNotice({
         type: 'success',
-        message: `Checked in ${employee.name} at ${inTime}.`,
+        message: `${isNew ? 'Added' : 'Updated'} ${emp.name}.`,
       });
     }
   };
 
-  const handleMarkCheckOut = async ({
-    record,
-    employee,
-    outTime,
-    breakMinutes,
-    markedBy,
-    notes,
-  }: {
-    record: AttendanceRecord;
-    employee: Employee;
-    outTime: string;
-    breakMinutes: number;
-    markedBy: string;
-    notes: string;
-  }) => {
-    const calc = calculateShiftMetrics(record.inTime, outTime, breakMinutes);
-    const updatedRecord: AttendanceRecord = {
-      ...record,
-      outTime,
-      grossMinutes: calc.grossMinutes,
-      breakMinutes: calc.breakDeductedMinutes,
-      netMinutes: calc.netMinutes,
-      netDecimalHours: calc.netDecimalHours,
-      status: calc.status,
-      markedBy,
-      notes,
-      syncedToSheet: false,
-      updatedAt: new Date().toISOString(),
-    };
+  const handleToggleActive = async (emp: Employee) => {
+    await handleSaveEmployee({ ...emp, active: !emp.active }, false);
+  };
 
-    const nextRecords = sortRecordsNewestFirst(
-      records.map((r) => (r.id === record.id ? updatedRecord : r))
-    );
-    setRecords(nextRecords);
-
-    if (sheetConfig && getAccessToken()) {
-      await syncOneEmployeeAndMaster(employee, employees, nextRecords);
+  const handleLoadStarterRoster = async () => {
+    if (!adminToken) return;
+    const res = await fetch('/api/admin/employees/starter', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const body = (await res.json()) as { employees?: Employee[] };
+    if (res.ok && body.employees) {
+      setEmployees(body.employees);
+      await fetchGateStatus();
       setNotice({
         type: 'success',
-        message: `Checked out ${employee.name} at ${outTime} (${calc.netDecimalHours.toFixed(2)} net hrs after ${calc.breakDeductedMinutes}m break) and synced to Google Sheets.`,
-      });
-    } else {
-      setNotice({
-        type: 'success',
-        message: `Checked out ${employee.name} at ${outTime} (${calc.netDecimalHours.toFixed(2)} net hrs after ${calc.breakDeductedMinutes}m break).`,
+        message: 'Loaded 5 starter employees. Guard can now mark check-in and check-out.',
       });
     }
   };
 
-  // Master Attendance Edit & Delete (with explicit confirmation when mutating Google Sheets or deleting)
   const handleUpdateRecord = async (updated: AttendanceRecord) => {
+    if (!adminToken) return;
+
+    const saveToServer = async () => {
+      const res = await fetch(`/api/admin/records/${encodeURIComponent(updated.id)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          date: updated.date,
+          inTime: updated.inTime,
+          outTime: updated.outTime,
+          breakMinutes: updated.breakMinutes,
+        }),
+      });
+      const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+      if (!res.ok || !body.record) {
+        throw new Error(body.error || 'Failed to update record.');
+      }
+      const nextRecords = sortRecordsNewestFirst(
+        records.map((r) => (r.id === updated.id ? body.record! : r))
+      );
+      setRecords(nextRecords);
+      await fetchGateStatus();
+      return nextRecords;
+    };
+
     const emp = employees.find(
       (e) => e.id === updated.empId || e.empCode === updated.empCode
-    );
-    const nextRecords = sortRecordsNewestFirst(
-      records.map((r) => (r.id === updated.id ? updated : r))
     );
 
     if (sheetConfig && getAccessToken() && emp) {
       setConfirmRequest({
-        title: 'Update Attendance Entry in Google Sheets?',
-        description: `Save modified attendance timings for ${updated.empName} on ${updated.date} and update Google Sheets.`,
+        title: 'Update Entry in Google Sheets?',
+        description: `Save corrected timings for ${updated.empName} (${updated.date}) and update Google Sheets.`,
         affectedTarget: sheetConfig.spreadsheetTitle,
         details: [
           'Updates Master Attendance tab',
-          `Updates individual tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
+          `Updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
         ],
-        confirmLabel: 'Save & Sync Sheet',
+        confirmLabel: 'Save & Sync',
         onConfirm: async () => {
-          setRecords(nextRecords);
+          const nextRecords = await saveToServer();
           await syncOneEmployeeAndMaster(emp, employees, nextRecords);
           setNotice({
             type: 'success',
@@ -406,7 +561,7 @@ export default function App() {
         },
       });
     } else {
-      setRecords(nextRecords);
+      await saveToServer();
       setNotice({
         type: 'success',
         message: `Updated ${updated.empName}'s attendance entry.`,
@@ -415,6 +570,7 @@ export default function App() {
   };
 
   const handleDeleteRecord = (record: AttendanceRecord) => {
+    if (!adminToken) return;
     const emp = employees.find(
       (e) => e.id === record.empId || e.empCode === record.empCode
     );
@@ -422,96 +578,44 @@ export default function App() {
 
     setConfirmRequest({
       title: 'Delete Attendance Record?',
-      description: `Permanently remove the ${record.date} entry for ${record.empName} (${record.inTime}${record.outTime ? ` – ${record.outTime}` : ''}).`,
+      description: `Permanently delete ${record.empName}'s entry for ${record.date}.`,
       affectedTarget: hasSheet ? sheetConfig?.spreadsheetTitle : undefined,
       details: hasSheet
-        ? [
-            'Removes the row from Master Attendance tab',
-            `Updates ${record.empName}'s individual sheet tab`,
-          ]
-        : ['Removes the record from your local attendance register'],
+        ? ['Removes row from Master Attendance and employee sheet tab']
+        : ['Removes entry from server attendance register'],
       confirmLabel: 'Delete Entry',
       destructive: true,
       onConfirm: async () => {
+        const res = await fetch(`/api/admin/records/${encodeURIComponent(record.id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        if (!res.ok) return;
         const nextRecords = records.filter((r) => r.id !== record.id);
         setRecords(nextRecords);
+        await fetchGateStatus();
         if (hasSheet && emp) {
           await syncOneEmployeeAndMaster(emp, employees, nextRecords);
         }
         setNotice({
           type: 'info',
-          message: `Deleted attendance record for ${record.empName} (${record.date}).`,
+          message: `Deleted record for ${record.empName} (${record.date}).`,
         });
       },
     });
   };
 
-  // Employee Directory Mutations
-  const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
-    const nextEmployees = isNew
-      ? [...employees, emp]
-      : employees.map((e) => (e.id === emp.id ? emp : e));
-
-    if (sheetConfig && getAccessToken()) {
-      setConfirmRequest({
-        title: isNew ? 'Add Employee & Create Sheet Tab?' : 'Update Employee in Google Sheets?',
-        description: isNew
-          ? `Add ${emp.name} (${emp.empCode}) to your roster and create their individual tab in the Master Google Sheet.`
-          : `Save changes for ${emp.name} (${emp.empCode}) and update the Employees & individual sheet tabs.`,
-        affectedTarget: sheetConfig.spreadsheetTitle,
-        details: [
-          'Updates Employees tab',
-          `Creates/updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
-        ],
-        confirmLabel: isNew ? 'Add & Sync Tab' : 'Save & Sync',
-        onConfirm: async () => {
-          setEmployees(nextEmployees);
-          await syncOneEmployeeAndMaster(emp, nextEmployees, records);
-          setNotice({
-            type: 'success',
-            message: `${isNew ? 'Added' : 'Updated'} ${emp.name} and synced to Google Sheets.`,
-          });
-        },
-      });
-    } else {
-      setEmployees(nextEmployees);
-      setNotice({
-        type: 'success',
-        message: `${isNew ? 'Added' : 'Updated'} ${emp.name} in roster.`,
-      });
-    }
-  };
-
-  const handleToggleActive = async (emp: Employee) => {
-    const updated = { ...emp, active: !emp.active };
-    await handleSaveEmployee(updated, false);
-  };
-
-  const handleLoadStarterRoster = () => {
-    const starter = buildStarterEmployees();
-    setEmployees(starter);
-    setNotice({
-      type: 'success',
-      message: 'Loaded 5 starter staff profiles. Guard can now mark check-in and check-out times.',
-    });
-  };
-
-  // Google Sheets Sync Actions (all guarded by ConfirmDialog)
   const handleRequestCreateMasterSheet = (title: string) => {
     const token = getAccessToken();
-    if (!token) {
-      setNeedsAuth(true);
-      return;
-    }
+    if (!token) return;
 
     setConfirmRequest({
       title: 'Create Master Attendance Google Sheet?',
-      description: `This will create a new Google Spreadsheet named "${title}" in your Google Drive with structured tabs for all attendance records and individual employee sheets.`,
+      description: `Create "${title}" in Google Drive with clean Master Attendance, Employees, and Individual Employee tabs.`,
       affectedTarget: title,
       details: [
-        'Tab 1: Master Attendance (all guard check-in/out logs & net hours)',
-        'Tab 2: Employees (roster, shifts & 30-min break rules)',
-        `Individual Tabs: ${employees.length} employee sheet tab(s) with summary formulas`,
+        'Master Attendance: Date, Employee ID, Name, In Time, Out Time, Working Hours',
+        `Individual Tabs: ${employees.length} employee tab(s) with total hours formula`,
       ],
       confirmLabel: 'Create Google Sheet',
       onConfirm: async () => {
@@ -519,15 +623,15 @@ export default function App() {
         try {
           const cfg = await createMasterSpreadsheet(token, title, employees, records);
           setSheetConfig(cfg);
-          localStorage.setItem(STORAGE_SHEET_ID_KEY, cfg.spreadsheetId);
           setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
+          await persistSheetConfigOnServer(cfg, true);
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
-            message: `Created "${cfg.spreadsheetTitle}" with Master Attendance and ${employees.length} individual employee tabs.`,
+            message: `Created "${cfg.spreadsheetTitle}" with ${employees.length} individual employee tabs.`,
           });
         } catch (err) {
-          handleApiError(err, 'Failed to create Google Spreadsheet.');
+          handleGoogleError(err, 'Failed to create Google Spreadsheet.');
         } finally {
           setIsSyncing(false);
         }
@@ -535,21 +639,72 @@ export default function App() {
     });
   };
 
+  const connectSpreadsheet = async (idOrUrl: string, loadDataIntoApp = false) => {
+    const token = getAccessToken();
+    if (!token) return;
+    const spreadsheetId = extractSpreadsheetId(idOrUrl);
+    setIsSyncing(true);
+    try {
+      const loaded = await loadWorkbookData(token, spreadsheetId);
+      setSheetConfig(loaded.config);
+
+      if (loadDataIntoApp && adminToken) {
+        const nextEmps = loaded.employees.length > 0 ? loaded.employees : employees;
+        const nextRecs =
+          loaded.records.length > 0
+            ? sortRecordsNewestFirst(loaded.records)
+            : records;
+        setEmployees(nextEmps);
+        setRecords(nextRecs);
+        await fetch('/api/admin/import-from-sheet', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            employees: nextEmps,
+            records: nextRecs,
+            sheetConfig: loaded.config,
+          }),
+        });
+        await fetchGateStatus();
+        setNotice({
+          type: 'success',
+          message: `Loaded ${loaded.employees.length} employees and ${loaded.records.length} entries from "${loaded.config.spreadsheetTitle}".`,
+        });
+      } else {
+        await persistSheetConfigOnServer(loaded.config, false);
+        setNotice({
+          type: 'success',
+          message: `Connected to "${loaded.config.spreadsheetTitle}".`,
+        });
+      }
+    } catch (err) {
+      handleGoogleError(err, 'Could not connect to that Google Spreadsheet.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const handleRequestSyncAll = () => {
     const token = getAccessToken();
     if (!token || !sheetConfig) {
-      setNeedsAuth(true);
+      setActiveNav('sheets-sync');
+      setNotice({
+        type: 'info',
+        message: 'Sign in with Google first to sync with Google Sheets.',
+      });
       return;
     }
 
     setConfirmRequest({
-      title: 'Sync All Attendance & Employee Tabs?',
-      description: `Overwrite and synchronize the Master Attendance log, Employees roster, and all ${employees.length} individual employee tabs in "${sheetConfig.spreadsheetTitle}".`,
+      title: 'Sync All Attendance & Individual Tabs?',
+      description: `Update Master Attendance, Employees, and all ${employees.length} individual employee tabs in "${sheetConfig.spreadsheetTitle}".`,
       affectedTarget: sheetConfig.spreadsheetTitle,
       details: [
-        `Master Attendance: ${records.length} record(s)`,
-        `Employees Roster: ${employees.length} employee(s)`,
-        `Individual Employee Tabs: ${employees.length} tab(s) updated`,
+        `${records.length} attendance record(s)`,
+        `${employees.length} individual employee sheet tab(s)`,
       ],
       confirmLabel: 'Sync All Tabs',
       onConfirm: async () => {
@@ -563,12 +718,13 @@ export default function App() {
           );
           setSheetConfig(cfg);
           setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
+          await persistSheetConfigOnServer(cfg, true);
           setNotice({
             type: 'success',
-            message: `Synchronized all tabs in "${cfg.spreadsheetTitle}".`,
+            message: `Synced all tabs in "${cfg.spreadsheetTitle}".`,
           });
         } catch (err) {
-          handleApiError(err, 'Failed to synchronize Google Sheet.');
+          handleGoogleError(err, 'Failed to sync Google Sheet.');
         } finally {
           setIsSyncing(false);
         }
@@ -578,17 +734,14 @@ export default function App() {
 
   const handleRequestSyncEmployeeTab = (employee: Employee) => {
     const token = getAccessToken();
-    if (!token || !sheetConfig) {
-      setNeedsAuth(true);
-      return;
-    }
+    if (!token || !sheetConfig) return;
     const tabName = getEmployeeSheetTabName(employee.empCode, employee.name);
 
     setConfirmRequest({
-      title: `Sync ${employee.name}'s Sheet Tab?`,
-      description: `Update "${tabName}" and Master Attendance in "${sheetConfig.spreadsheetTitle}" with ${employee.name}'s attendance records.`,
-      affectedTarget: `${sheetConfig.spreadsheetTitle} · Tab: ${tabName}`,
-      confirmLabel: 'Sync Employee Tab',
+      title: `Sync ${employee.name}'s Tab?`,
+      description: `Update "${tabName}" and Master Attendance in "${sheetConfig.spreadsheetTitle}".`,
+      affectedTarget: `${sheetConfig.spreadsheetTitle} · ${tabName}`,
+      confirmLabel: 'Sync Tab',
       onConfirm: async () => {
         await syncOneEmployeeAndMaster(employee, employees, records);
         setNotice({
@@ -601,22 +754,20 @@ export default function App() {
 
   const handleRequestStandaloneSheet = (employee: Employee) => {
     const token = getAccessToken();
-    if (!token) {
-      setNeedsAuth(true);
-      return;
-    }
+    if (!token) return;
     const isUpdate = Boolean(employee.individualSheetId);
 
     setConfirmRequest({
       title: isUpdate
-        ? `Update ${employee.name}'s Dedicated Google Sheet?`
-        : `Create Dedicated Google Sheet for ${employee.name}?`,
+        ? `Update ${employee.name}'s Individual Google Sheet?`
+        : `Create Individual Google Sheet for ${employee.name}?`,
       description: isUpdate
-        ? `Overwrite the standalone Google Sheet for ${employee.name} (${employee.empCode}) with their latest attendance entries and summary formulas.`
-        : `Create a separate standalone Google Spreadsheet file in Google Drive dedicated exclusively to ${employee.name} (${employee.empCode}).`,
-      affectedTarget: `Attendance Sheet - ${employee.empCode} ${employee.name}`,
-      confirmLabel: isUpdate ? 'Update Dedicated Sheet' : 'Create Dedicated Sheet',
+        ? `Update the standalone Google Sheet for ${employee.name} with their attendance records.`
+        : `Create a dedicated standalone Google Sheet file in Google Drive for ${employee.name} (${employee.empCode}).`,
+      affectedTarget: `${employee.empCode} - ${employee.name} Attendance`,
+      confirmLabel: isUpdate ? 'Update Sheet' : 'Create Sheet',
       onConfirm: async () => {
+        if (!adminToken) return;
         setIsSyncing(true);
         try {
           const res = await createOrUpdateStandaloneEmployeeSheet(token, employee, records);
@@ -625,21 +776,30 @@ export default function App() {
             individualSheetId: res.spreadsheetId,
             individualSheetUrl: res.spreadsheetUrl,
           };
-          const nextEmployees = employees.map((e) =>
-            e.id === employee.id ? updatedEmp : e
-          );
-          setEmployees(nextEmployees);
+          const saveRes = await fetch('/api/admin/employees', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify(updatedEmp),
+          });
+          const body = (await saveRes.json()) as { employees?: Employee[] };
+          const nextEmps =
+            body.employees ??
+            employees.map((e) => (e.id === employee.id ? updatedEmp : e));
+          setEmployees(nextEmps);
 
           if (sheetConfig) {
-            await syncOneEmployeeAndMaster(updatedEmp, nextEmployees, records);
+            await syncOneEmployeeAndMaster(updatedEmp, nextEmps, records);
           }
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
-            message: `${isUpdate ? 'Updated' : 'Created'} dedicated Google Sheet for ${employee.name}.`,
+            message: `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name}.`,
           });
         } catch (err) {
-          handleApiError(err, 'Could not create or update dedicated employee sheet.');
+          handleGoogleError(err, 'Could not create or update individual Google Sheet.');
         } finally {
           setIsSyncing(false);
         }
@@ -648,21 +808,21 @@ export default function App() {
   };
 
   const handlePullFromSheet = () => {
-    const token = getAccessToken();
-    if (!token || !sheetConfig) return;
-
+    if (!sheetConfig) return;
     setConfirmRequest({
-      title: 'Load Attendance & Staff from Google Sheet?',
-      description: `Replace local workspace records with the current data stored in "${sheetConfig.spreadsheetTitle}".`,
+      title: 'Load Data from Google Sheet?',
+      description: `Load employees and attendance records from "${sheetConfig.spreadsheetTitle}" into this app.`,
       affectedTarget: sheetConfig.spreadsheetTitle,
       confirmLabel: 'Load from Sheet',
       onConfirm: async () => {
-        await connectSpreadsheet(sheetConfig.spreadsheetId, token, true);
+        await connectSpreadsheet(sheetConfig.spreadsheetId, true);
       },
     });
   };
 
-  const activeNavLabel = NAV_ITEMS.find((n) => n.id === activeNav)?.label ?? 'Guard Gate Desk';
+  const isAdminUnlocked = Boolean(adminToken);
+  const currentNavItem = NAV_ITEMS.find((n) => n.id === activeNav) ?? NAV_ITEMS[0];
+  const requiresAdminGate = currentNavItem.adminOnly && !isAdminUnlocked;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -678,32 +838,41 @@ export default function App() {
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = activeNav === item.id;
+            const locked = item.adminOnly && !isAdminUnlocked;
+
             return (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => setActiveNav(item.id)}
-                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                   active
                     ? 'bg-slate-900 text-white'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                 }`}
               >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span>{item.label}</span>
+                <span className="flex items-center gap-3 min-w-0">
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{item.label}</span>
+                </span>
+                {locked && (
+                  <Lock
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      active ? 'text-slate-300' : 'text-slate-400'
+                    }`}
+                    aria-label="Admin protected"
+                  />
+                )}
               </button>
             );
           })}
         </nav>
 
         <div className="border-t border-slate-200 p-4 text-xs text-slate-500 space-y-1">
-          <div className="font-medium text-slate-700">Break Deduction Rule</div>
-          <div>30 min auto-deducted per shift</div>
-          {sheetConfig && (
-            <div className="pt-2 truncate font-medium text-teal-800">
-              Sheet: {sheetConfig.spreadsheetTitle}
-            </div>
-          )}
+          <div className="font-medium text-slate-700">
+            {isAdminUnlocked ? 'Admin Mode Active' : 'Guard Mode (Open)'}
+          </div>
+          <div>30 min break deducted on Mark Out</div>
         </div>
       </aside>
 
@@ -732,6 +901,8 @@ export default function App() {
               {NAV_ITEMS.map((item) => {
                 const Icon = item.icon;
                 const active = activeNav === item.id;
+                const locked = item.adminOnly && !isAdminUnlocked;
+
                 return (
                   <button
                     key={item.id}
@@ -740,14 +911,17 @@ export default function App() {
                       setActiveNav(item.id);
                       setMobileMenuOpen(false);
                     }}
-                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium whitespace-nowrap ${
+                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-sm font-medium whitespace-nowrap ${
                       active
                         ? 'bg-slate-900 text-white'
                         : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                     }`}
                   >
-                    <Icon className="h-4 w-4 shrink-0" />
-                    <span>{item.label}</span>
+                    <span className="flex items-center gap-3">
+                      <Icon className="h-4 w-4 shrink-0" />
+                      <span>{item.label}</span>
+                    </span>
+                    {locked && <Lock className="h-3.5 w-3.5 text-slate-400" />}
                   </button>
                 );
               })}
@@ -756,9 +930,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content Shell */}
+      {/* Main Content */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top Bar Contract: Breadcrumb on left, Primary Action / Auth on right */}
+        {/* Top Bar Contract: Breadcrumb on left, 1 primary action on right */}
         <header className="flex h-16 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -774,43 +948,49 @@ export default function App() {
               <span className="text-slate-300 hidden sm:inline" aria-hidden="true">
                 /
               </span>
-              <h1 className="font-semibold text-slate-900 truncate">{activeNavLabel}</h1>
+              <h1 className="font-semibold text-slate-900 truncate">
+                {currentNavItem.label}
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
-            {needsAuth ? (
-              <GoogleSignInButton
-                onClick={handleGoogleLogin}
-                disabled={isLoggingIn}
-                label={isLoggingIn ? 'Signing in...' : 'Sign in with Google'}
-              />
-            ) : sheetConfig ? (
-              <a
-                href={sheetConfig.spreadsheetUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-              >
-                <span>{isSyncing ? 'Syncing...' : 'Open Google Sheet'}</span>
-                <ExternalLink className="h-3.5 w-3.5" />
-              </a>
+          <div className="flex items-center gap-2.5 shrink-0">
+            {isAdminUnlocked ? (
+              <>
+                {sheetConfig && hasGoogleToken && (
+                  <a
+                    href={sheetConfig.spreadsheetUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  >
+                    <span>{isSyncing ? 'Syncing...' : 'Open Google Sheet'}</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={handleLockAdmin}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Lock className="h-3.5 w-3.5" />
+                  <span>Lock Admin</span>
+                </button>
+              </>
             ) : (
               <button
                 type="button"
-                onClick={() => setActiveNav('sheets-sync')}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                onClick={() => setActiveNav('master-log')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
               >
-                <FileSpreadsheet className="h-3.5 w-3.5" />
-                <span>Connect Google Sheet</span>
+                <Unlock className="h-3.5 w-3.5" />
+                <span>Admin Login</span>
               </button>
             )}
           </div>
         </header>
 
-        {/* Main Viewport */}
         <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-6 sm:px-6 lg:px-8 space-y-6">
-          {/* Action Feedback Banner */}
           {notice && (
             <div
               className={`flex items-center justify-between gap-4 rounded-xl border px-4 py-3 text-xs font-medium ${
@@ -842,20 +1022,27 @@ export default function App() {
 
           {activeNav === 'guard-gate' && (
             <GuardGateView
-              employees={employees}
-              records={records}
-              sheetConfig={sheetConfig}
-              isGoogleAuthed={!needsAuth}
-              guardName={guardName}
-              onGuardNameChange={setGuardName}
-              onMarkCheckIn={handleMarkCheckIn}
-              onMarkCheckOut={handleMarkCheckOut}
-              onNavigateToEmployees={() => setActiveNav('employees')}
-              onLoadStarterRoster={handleLoadStarterRoster}
+              employees={gateEmployees}
+              todayRecords={todayRecords}
+              serverDate={serverDate}
+              onMarkIn={handleGuardMarkIn}
+              onMarkOut={handleGuardMarkOut}
+              onOpenAdminGate={() => setActiveNav('employees')}
             />
           )}
 
-          {activeNav === 'master-log' && (
+          {requiresAdminGate && (
+            <AdminAuthGate
+              authStatus={adminAuthStatus}
+              isSigningInGoogle={isLoggingInGoogle}
+              onPasswordLogin={handlePasswordLogin}
+              onSetupPassword={handleSetupPassword}
+              onGoogleAdminLogin={handleGoogleAdminLogin}
+              onBackToGuard={() => setActiveNav('guard-gate')}
+            />
+          )}
+
+          {isAdminUnlocked && activeNav === 'master-log' && (
             <MasterAttendanceView
               employees={employees}
               records={records}
@@ -866,18 +1053,18 @@ export default function App() {
             />
           )}
 
-          {activeNav === 'individual-sheets' && (
+          {isAdminUnlocked && activeNav === 'individual-sheets' && (
             <IndividualEmployeeView
               employees={employees}
               records={records}
               sheetConfig={sheetConfig}
-              isGoogleAuthed={!needsAuth}
+              isGoogleAuthed={hasGoogleToken}
               onRequestSyncEmployeeTab={handleRequestSyncEmployeeTab}
               onRequestStandaloneSheet={handleRequestStandaloneSheet}
             />
           )}
 
-          {activeNav === 'employees' && (
+          {isAdminUnlocked && activeNav === 'employees' && (
             <EmployeesView
               employees={employees}
               onSaveEmployee={handleSaveEmployee}
@@ -886,31 +1073,31 @@ export default function App() {
             />
           )}
 
-          {activeNav === 'sheets-sync' && (
+          {isAdminUnlocked && activeNav === 'sheets-sync' && (
             <GoogleSheetsSyncView
-              user={user}
-              hasToken={!needsAuth}
-              isSigningIn={isLoggingIn}
-              onGoogleLogin={handleGoogleLogin}
+              user={googleUser}
+              hasGoogleToken={hasGoogleToken}
+              isSigningIn={isLoggingInGoogle}
+              onGoogleLogin={handleConnectGoogleForSheetsOnly}
               onGoogleLogout={handleGoogleLogout}
               sheetConfig={sheetConfig}
               driveFiles={driveFiles}
               loadingDriveFiles={loadingDriveFiles}
               onRefreshDriveFiles={() => refreshDriveFiles()}
               onRequestCreateMasterSheet={handleRequestCreateMasterSheet}
-              onConnectSpreadsheetById={(idOrUrl) => connectSpreadsheet(idOrUrl, undefined, false)}
+              onConnectSpreadsheetById={(idOrUrl) => connectSpreadsheet(idOrUrl, false)}
               onRequestSyncAll={handleRequestSyncAll}
               onPullFromSheet={handlePullFromSheet}
-              onDisconnectSheet={() => {
+              onDisconnectSheet={async () => {
                 setSheetConfig(null);
-                localStorage.removeItem(STORAGE_SHEET_ID_KEY);
+                await persistSheetConfigOnServer(null, false);
               }}
+              onChangeAdminPassword={handleChangeAdminPassword}
             />
           )}
         </main>
       </div>
 
-      {/* Explicit Confirmation Modal for Workspace API Mutations */}
       <ConfirmDialog
         request={confirmRequest}
         onClose={() => setConfirmRequest(null)}

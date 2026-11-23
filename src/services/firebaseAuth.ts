@@ -47,7 +47,11 @@ export const initAuth = (
   });
 };
 
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string }> => {
+export const googleSignIn = async (): Promise<{
+  user: User;
+  accessToken: string;
+  idToken: string;
+}> => {
   try {
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
@@ -55,8 +59,9 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     if (!credential?.accessToken) {
       throw new Error('Could not obtain Google access token. Please try signing in again.');
     }
+    const idToken = await result.user.getIdToken();
     cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
+    return { user: result.user, accessToken: cachedAccessToken, idToken };
   } finally {
     isSigningIn = false;
   }
