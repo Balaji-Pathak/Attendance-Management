@@ -1,0 +1,216 @@
+import { AttendanceRecord, AttendanceStatus, Employee } from '../types/attendance';
+
+export function getTodayISO(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function getCurrentHHMM(): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+export function parseTimeToMinutes(hhmm: string): number {
+  const parts = hhmm.split(':');
+  if (parts.length < 2) return 0;
+  const h = Number(parts[0]);
+  const m = Number(parts[1]);
+  if (Number.isNaN(h) || Number.isNaN(m)) return 0;
+  return h * 60 + m;
+}
+
+export function formatDisplayTime(hhmm: string | null): string {
+  if (!hhmm) return '—';
+  const [hStr, mStr] = hhmm.split(':');
+  const h = Number(hStr);
+  const m = Number(mStr);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const hour12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(hour12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+export function formatDurationHM(totalMinutes: number | null): string {
+  if (totalMinutes === null || Number.isNaN(totalMinutes)) return '—';
+  const safe = Math.max(0, Math.round(totalMinutes));
+  const hrs = Math.floor(safe / 60);
+  const mins = safe % 60;
+  return `${hrs}h ${String(mins).padStart(2, '0')}m`;
+}
+
+export function formatDurationClock(totalMinutes: number | null): string {
+  if (totalMinutes === null || Number.isNaN(totalMinutes)) return '—';
+  const safe = Math.max(0, Math.round(totalMinutes));
+  const hrs = Math.floor(safe / 60);
+  const mins = safe % 60;
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+}
+
+export interface ShiftCalculationResult {
+  grossMinutes: number;
+  breakDeductedMinutes: number;
+  netMinutes: number;
+  netDecimalHours: number;
+  isOvernight: boolean;
+  status: AttendanceStatus;
+}
+
+/**
+ * Computes gross shift duration, applies the standard 30-minute break deduction
+ * (or custom breakMinutes), and derives net working minutes and decimal hours.
+ * Supports overnight shifts where outTime < inTime by rolling over 24 hours.
+ */
+export function calculateShiftMetrics(
+  inTime: string,
+  outTime: string,
+  breakMinutes = 30
+): ShiftCalculationResult {
+  const inMins = parseTimeToMinutes(inTime);
+  let outMins = parseTimeToMinutes(outTime);
+  let isOvernight = false;
+
+  if (outMins < inMins) {
+    outMins += 24 * 60;
+    isOvernight = true;
+  }
+
+  const grossMinutes = Math.max(0, outMins - inMins);
+  const safeBreak = Math.max(0, breakMinutes);
+  const breakDeductedMinutes = grossMinutes >= safeBreak ? safeBreak : grossMinutes;
+  const netMinutes = Math.max(0, grossMinutes - breakDeductedMinutes);
+  const netDecimalHours = Number((netMinutes / 60).toFixed(2));
+  const status: AttendanceStatus = netMinutes < 240 ? 'short_shift' : 'completed';
+
+  return {
+    grossMinutes,
+    breakDeductedMinutes,
+    netMinutes,
+    netDecimalHours,
+    isOvernight,
+    status,
+  };
+}
+
+export function formatDisplayDate(dateIso: string): string {
+  if (!dateIso) return '—';
+  const [y, m, d] = dateIso.split('-').map(Number);
+  if (!y || !m || !d) return dateIso;
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+export function getStatusLabel(status: AttendanceStatus | 'not_in'): string {
+  switch (status) {
+    case 'on_duty':
+      return 'On Duty';
+    case 'completed':
+      return 'Completed';
+    case 'short_shift':
+      return 'Short Shift';
+    case 'not_in':
+      return 'Not Checked In';
+  }
+}
+
+export function getEmployeeSheetTabName(empCode: string, name: string): string {
+  const raw = `${empCode} - ${name}`;
+  const sanitized = raw.replace(/[:\\/?*[\]]/g, '-').trim();
+  return sanitized.slice(0, 85) || 'Employee';
+}
+
+export function downloadCSV(filename: string, headers: string[], rows: (string | number)[][]): void {
+  const escapeCell = (val: string | number): string => {
+    const str = String(val ?? '');
+    if (/[",\n]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+  const csv = [headers.map(escapeCell).join(','), ...rows.map((r) => r.map(escapeCell).join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export function buildStarterEmployees(): Employee[] {
+  return [
+    {
+      id: 'emp-101',
+      empCode: 'EMP-001',
+      name: 'Rajesh Kumar',
+      department: 'Production Floor',
+      role: 'Machine Operator',
+      shiftStart: '09:00',
+      shiftEnd: '18:00',
+      breakMinutes: 30,
+      active: true,
+    },
+    {
+      id: 'emp-102',
+      empCode: 'EMP-002',
+      name: 'Anita Sharma',
+      department: 'Quality Control',
+      role: 'QC Inspector',
+      shiftStart: '09:00',
+      shiftEnd: '18:00',
+      breakMinutes: 30,
+      active: true,
+    },
+    {
+      id: 'emp-103',
+      empCode: 'EMP-003',
+      name: 'Vikram Patel',
+      department: 'Warehouse & Dispatch',
+      role: 'Dispatch Supervisor',
+      shiftStart: '08:30',
+      shiftEnd: '17:30',
+      breakMinutes: 30,
+      active: true,
+    },
+    {
+      id: 'emp-104',
+      empCode: 'EMP-004',
+      name: 'Meena Verma',
+      department: 'Packaging Unit',
+      role: 'Line Lead',
+      shiftStart: '09:00',
+      shiftEnd: '18:00',
+      breakMinutes: 30,
+      active: true,
+    },
+    {
+      id: 'emp-105',
+      empCode: 'EMP-005',
+      name: 'Suresh Nair',
+      department: 'Maintenance',
+      role: 'Electrical Technician',
+      shiftStart: '09:00',
+      shiftEnd: '18:00',
+      breakMinutes: 30,
+      active: true,
+    },
+  ];
+}
+
+export function sortRecordsNewestFirst(records: AttendanceRecord[]): AttendanceRecord[] {
+  return [...records].sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return b.inTime.localeCompare(a.inTime);
+  });
+}

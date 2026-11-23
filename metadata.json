@@ -1,0 +1,8 @@
+{
+  "name": "GateLog Attendance",
+  "description": "Employee attendance management system for guard check-in and check-out tracking, automatic 30-minute break deduction, and live Google Sheets synchronization with individual employee sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
