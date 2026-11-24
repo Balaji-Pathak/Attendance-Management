@@ -18,6 +18,7 @@ import {
   downloadCSV,
   formatDisplayTime,
   formatMonthLabel,
+  getCurrentYearMonth,
   getDayNameShort,
   getEmployeeSheetTabName,
   getMonthDays,
@@ -64,11 +65,6 @@ function getPreviousYearMonth(): string {
   return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function getCurrentYearMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-}
-
 export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   employees,
   records,
@@ -82,7 +78,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   onUpdateSingleRecord,
   onSaveMonthlyThikada,
 }) => {
+  const currentYearMonth = getCurrentYearMonth();
   const [selectedEmpId, setSelectedEmpId] = useState<string>(employees[0]?.id ?? '');
+  const [overviewMonth, setOverviewMonth] = useState<string>(() => getCurrentYearMonth());
 
   // Import existing Google Sheet UI state
   const [showImportPanel, setShowImportPanel] = useState(false);
@@ -172,26 +170,48 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   }, [allEmployeeRecords, selectedEmployee]);
 
   const overallSummary = useMemo(() => {
-    let presentCount = 0;
-    let netMinutes = 0;
-    let totalThekaMinutes = 0;
-    let netNormalMinutes = 0;
+    if (!overviewMonth) {
+      let presentCount = 0;
+      let netMinutes = 0;
+      let totalThekaMinutes = 0;
+      let netNormalMinutes = 0;
 
-    for (const m of savedMonthSummaries) {
-      presentCount += m.presentCount;
-      netMinutes += m.netMinutes;
-      totalThekaMinutes += Math.round(m.thekaDecimal * 60);
-      netNormalMinutes += m.netNormalMinutes;
+      for (const m of savedMonthSummaries) {
+        presentCount += m.presentCount;
+        netMinutes += m.netMinutes;
+        totalThekaMinutes += Math.round(m.thekaDecimal * 60);
+        netNormalMinutes += m.netNormalMinutes;
+      }
+
+      return {
+        presentCount,
+        netDecimal: Number((netMinutes / 60).toFixed(2)),
+        thekaDecimal: Number((totalThekaMinutes / 60).toFixed(2)),
+        netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
+        monthsCount: savedMonthSummaries.length,
+      };
     }
 
+    const matched = savedMonthSummaries.find((m) => m.yearMonth === overviewMonth);
+    if (matched) {
+      return {
+        presentCount: matched.presentCount,
+        netDecimal: matched.netDecimal,
+        thekaDecimal: matched.thekaDecimal,
+        netNormalDecimal: matched.netNormalDecimal,
+        monthsCount: 1,
+      };
+    }
+
+    const monthThekaMinutes = selectedEmployee?.monthlyThikadaMinutes?.[overviewMonth] ?? 0;
     return {
-      presentCount,
-      netDecimal: Number((netMinutes / 60).toFixed(2)),
-      thekaDecimal: Number((totalThekaMinutes / 60).toFixed(2)),
-      netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
-      monthsCount: savedMonthSummaries.length,
+      presentCount: 0,
+      netDecimal: 0,
+      thekaDecimal: Number((monthThekaMinutes / 60).toFixed(2)),
+      netNormalDecimal: 0,
+      monthsCount: 0,
     };
-  }, [savedMonthSummaries]);
+  }, [savedMonthSummaries, overviewMonth, selectedEmployee]);
 
   // History Attendance modal records for selected historyMonth
   const historyMonthRecords = useMemo(() => {
@@ -293,7 +313,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
   const handleOpenHistoryModal = (targetMonth?: string) => {
     const fallbackMonth =
-      targetMonth || savedMonthSummaries[0]?.yearMonth || getCurrentYearMonth();
+      targetMonth || overviewMonth || savedMonthSummaries[0]?.yearMonth || currentYearMonth;
     setHistoryMonth(fallbackMonth);
     setShowHistoryModal(true);
     setShowImportPanel(false);
@@ -537,14 +557,17 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         <div className="border-b border-slate-200 px-5 py-4">
           <h2 className="text-sm font-semibold text-slate-900">Select Employee Sheet</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            {employees.length} employee{employees.length === 1 ? '' : 's'}
+            {employees.length} employee{employees.length === 1 ? '' : 's'} ·{' '}
+            {overviewMonth ? formatMonthLabel(overviewMonth) : 'All Months'}
           </p>
         </div>
         <div className="divide-y divide-slate-100 max-h-[540px] overflow-y-auto">
           {employees.map((emp) => {
             const isSelected = emp.id === selectedEmployee.id;
             const count = records.filter(
-              (r) => r.empId === emp.id || r.empCode === emp.empCode
+              (r) =>
+                (r.empId === emp.id || r.empCode === emp.empCode) &&
+                (!overviewMonth || r.date.startsWith(overviewMonth))
             ).length;
 
             return (
@@ -739,29 +762,72 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           )}
         </section>
 
-        <section className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Total Present (P)</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
-              {overallSummary.presentCount}
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3">
+            <div className="text-xs font-semibold text-slate-800">
+              {overviewMonth
+                ? `${formatMonthLabel(overviewMonth)} Summary`
+                : 'All Saved Months Summary'}
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <label
+                htmlFor="employee-overview-month"
+                className="text-xs font-medium text-slate-500"
+              >
+                Month:
+              </label>
+              <input
+                id="employee-overview-month"
+                type="month"
+                value={overviewMonth}
+                onChange={(e) => setOverviewMonth(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
+              />
+              {overviewMonth !== currentYearMonth && (
+                <button
+                  type="button"
+                  onClick={() => setOverviewMonth(currentYearMonth)}
+                  className="text-xs font-medium text-teal-700 hover:underline whitespace-nowrap"
+                >
+                  This Month
+                </button>
+              )}
+              {overviewMonth !== '' && (
+                <button
+                  type="button"
+                  onClick={() => setOverviewMonth('')}
+                  className="text-xs font-medium text-slate-600 hover:text-slate-900 hover:underline whitespace-nowrap"
+                >
+                  All Months
+                </button>
+              )}
             </div>
           </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Net Normal Hours (H)</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
-              {overallSummary.netNormalDecimal.toFixed(2)}h
+
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+              <div className="text-xs font-medium text-slate-500">Present (P)</div>
+              <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
+                {overallSummary.presentCount}
+              </div>
             </div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Theka Deducted</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-700 tabular-nums">
-              {overallSummary.thekaDecimal.toFixed(2)}h
+            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+              <div className="text-xs font-medium text-slate-500">Net Normal Hours (H)</div>
+              <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
+                {overallSummary.netNormalDecimal.toFixed(2)}h
+              </div>
             </div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
-              {overallSummary.netDecimal.toFixed(2)}h
+            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+              <div className="text-xs font-medium text-slate-500">Theka Deducted</div>
+              <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-700 tabular-nums">
+                {overallSummary.thekaDecimal.toFixed(2)}h
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+              <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
+              <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
+                {overallSummary.netDecimal.toFixed(2)}h
+              </div>
             </div>
           </div>
         </section>

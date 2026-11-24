@@ -7,6 +7,8 @@ import {
   formatDisplayDate,
   formatDisplayTime,
   formatDurationHM,
+  formatMonthLabel,
+  getCurrentYearMonth,
   getDayNameShort,
   getRecordPayroll,
 } from '../utils/time';
@@ -29,7 +31,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   onDeleteRecord,
   onRequestSyncAll,
 }) => {
+  const currentYearMonth = getCurrentYearMonth();
   const [search, setSearch] = useState('');
+  const [monthFilter, setMonthFilter] = useState<string>(() => getCurrentYearMonth());
   const [dateFilter, setDateFilter] = useState('');
   const [empFilter, setEmpFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -40,7 +44,11 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
     const q = search.trim().toLowerCase();
     return [...records]
       .filter((r) => {
-        if (dateFilter && r.date !== dateFilter) return false;
+        if (dateFilter) {
+          if (r.date !== dateFilter) return false;
+        } else if (monthFilter) {
+          if (!r.date.startsWith(monthFilter)) return false;
+        }
         if (empFilter !== 'all' && r.empId !== empFilter) return false;
         if (statusFilter !== 'all' && r.status !== statusFilter) return false;
         if (!q) return true;
@@ -53,7 +61,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         if (a.date !== b.date) return b.date.localeCompare(a.date);
         return b.inTime.localeCompare(a.inTime);
       });
-  }, [records, dateFilter, empFilter, statusFilter, search]);
+  }, [records, monthFilter, dateFilter, empFilter, statusFilter, search]);
 
   const totals = useMemo(() => {
     let totalPresent = 0;
@@ -86,8 +94,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   }, [filteredRecords]);
 
   const handleExportCSV = () => {
+    const scopeSlug = dateFilter || monthFilter || 'all-months';
     downloadCSV(
-      `master-attendance${dateFilter ? `-${dateFilter}` : ''}.csv`,
+      `master-attendance-${scopeSlug}.csv`,
       [
         'Date',
         'Day',
@@ -189,22 +198,70 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               />
             </div>
 
-            <input
-              type="date"
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
-              aria-label="Filter by date"
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-800 focus:border-teal-700 focus:outline-none tabular-nums"
-            />
-            {dateFilter && (
-              <button
-                type="button"
-                onClick={() => setDateFilter('')}
-                className="text-xs font-medium text-teal-700 hover:underline whitespace-nowrap"
-              >
-                All Dates
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              <input
+                type="month"
+                value={monthFilter}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setMonthFilter(val);
+                  if (dateFilter && val && !dateFilter.startsWith(val)) {
+                    setDateFilter('');
+                  }
+                }}
+                aria-label="Filter by month"
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-800 focus:border-teal-700 focus:outline-none tabular-nums"
+              />
+              {monthFilter !== currentYearMonth && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMonthFilter(currentYearMonth);
+                    setDateFilter('');
+                  }}
+                  className="text-xs font-medium text-teal-700 hover:underline whitespace-nowrap"
+                >
+                  This Month
+                </button>
+              )}
+              {monthFilter !== '' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMonthFilter('');
+                    setDateFilter('');
+                  }}
+                  className="text-xs font-medium text-slate-600 hover:text-slate-900 hover:underline whitespace-nowrap"
+                >
+                  All Months
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={dateFilter}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setDateFilter(val);
+                  if (val) {
+                    setMonthFilter(val.slice(0, 7));
+                  }
+                }}
+                aria-label="Filter by date"
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-800 focus:border-teal-700 focus:outline-none tabular-nums"
+              />
+              {dateFilter && (
+                <button
+                  type="button"
+                  onClick={() => setDateFilter('')}
+                  className="text-xs font-medium text-teal-700 hover:underline whitespace-nowrap"
+                >
+                  All Dates
+                </button>
+              )}
+            </div>
 
             <select
               value={empFilter}
@@ -259,10 +316,16 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         {filteredRecords.length === 0 ? (
           <div className="px-6 py-14 text-center">
             <p className="text-base font-semibold text-slate-900">
-              No attendance logs yet
+              {dateFilter
+                ? `No attendance logs for ${formatDisplayDate(dateFilter)}`
+                : monthFilter
+                ? `No attendance logs for ${formatMonthLabel(monthFilter)}`
+                : 'No attendance logs yet'}
             </p>
             <p className="mt-1 text-sm text-slate-500">
-              Entries marked on the Guard Gate Desk appear here automatically.
+              {dateFilter || monthFilter
+                ? 'Entries marked on the Guard Gate Desk for this period will appear here, or pick another month above.'
+                : 'Entries marked on the Guard Gate Desk appear here automatically.'}
             </p>
           </div>
         ) : (
