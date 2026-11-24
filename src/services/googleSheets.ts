@@ -2,8 +2,10 @@ import { AttendanceRecord, DriveSpreadsheetItem, Employee, SheetConfig } from '.
 import {
   calculateShiftMetrics,
   formatDisplayTime,
+  formatMonthLabel,
   getDayNameShort,
   getEmployeeSheetTabName,
+  getRecordPayroll,
   isSundayISO,
   parseDisplayTimeToHHMM,
 } from '../utils/time';
@@ -23,7 +25,10 @@ const MASTER_HEADERS = [
   'Out Time',
   'Away (mins)',
   'Working Hours',
-  'Overtime Hours',
+  'Present (P)',
+  'Overtime (hrs)',
+  'Thikada (hrs)',
+  'Normal Hours (H)',
 ];
 
 const EMPLOYEES_HEADERS = [
@@ -41,7 +46,10 @@ const INDIVIDUAL_HEADERS = [
   'Out Time',
   'Away (mins)',
   'Working Hours',
-  'Overtime Hours',
+  'Present (P)',
+  'Overtime (hrs)',
+  'Thikada (hrs)',
+  'Normal Hours (H)',
 ];
 
 async function apiFetch<T>(url: string, token: string, init?: RequestInit): Promise<T> {
@@ -117,14 +125,6 @@ export async function getSpreadsheetMetadata(
   );
 }
 
-function getRecordOvertimeDecimal(r: AttendanceRecord): number | '' {
-  if (typeof r.overtimeDecimalHours === 'number') return r.overtimeDecimalHours;
-  if (r.netMinutes === null) return '';
-  const isSun = r.isSunday ?? isSundayISO(r.date);
-  const otMins = isSun ? r.netMinutes : Math.max(0, r.netMinutes - 480);
-  return Number((otMins / 60).toFixed(2));
-}
-
 function buildMasterRows(records: AttendanceRecord[]): (string | number)[][] {
   const sorted = [...records].sort((a, b) => {
     if (a.date !== b.date) return b.date.localeCompare(a.date);
@@ -133,17 +133,24 @@ function buildMasterRows(records: AttendanceRecord[]): (string | number)[][] {
 
   return [
     MASTER_HEADERS,
-    ...sorted.map((r) => [
-      r.date,
-      getDayNameShort(r.date),
-      r.empCode,
-      r.empName,
-      formatDisplayTime(r.inTime),
-      r.outTime ? formatDisplayTime(r.outTime) : '',
-      Math.round((r.pausedTotalSeconds ?? 0) / 60),
-      r.netDecimalHours !== null ? r.netDecimalHours : '',
-      getRecordOvertimeDecimal(r),
-    ]),
+    ...sorted.map((r) => {
+      const p = getRecordPayroll(r);
+      const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+      return [
+        r.date,
+        getDayNameShort(r.date),
+        r.empCode,
+        r.empName,
+        formatDisplayTime(r.inTime),
+        r.outTime ? formatDisplayTime(r.outTime) : '',
+        Math.round((r.pausedTotalSeconds ?? 0) / 60),
+        r.netDecimalHours !== null ? r.netDecimalHours : '',
+        hasOut ? p.presentCount : '',
+        hasOut ? p.overtimeDecimalHours : '',
+        p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
+        hasOut ? p.normalDecimalHours : '',
+      ];
+    }),
   ];
 }
 
@@ -160,48 +167,80 @@ function buildEmployeesRows(employees: Employee[]): (string | number)[][] {
   ];
 }
 
+function getMonthlyThikadaDecimal(employee: Employee, monthFilter?: string): number {
+  const map = employee.monthlyThikadaMinutes ?? {};
+  if (monthFilter) {
+    return Number(((map[monthFilter] ?? 0) / 60).toFixed(2));
+  }
+  const totalMins = Object.values(map).reduce(
+    (sum, v) => sum + (typeof v === 'number' && v > 0 ? v : 0),
+    0
+  );
+  return Number((totalMins / 60).toFixed(2));
+}
+
 function buildIndividualEmployeeRows(
   employee: Employee,
-  records: AttendanceRecord[]
+  records: AttendanceRecord[],
+  monthFilter?: string
 ): (string | number)[][] {
   const empRecords = records
-    .filter((r) => r.empId === employee.id || r.empCode === employee.empCode)
+    .filter(
+      (r) =>
+        (r.empId === employee.id || r.empCode === employee.empCode) &&
+        (!monthFilter || r.date.startsWith(monthFilter))
+    )
     .sort((a, b) => {
-      if (a.date !== b.date) return b.date.localeCompare(a.date);
-      return b.inTime.localeCompare(a.inTime);
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return a.inTime.localeCompare(b.inTime);
     });
 
   const lastDataRow = empRecords.length > 0 ? 4 + empRecords.length : 5;
+  const monthlyThikadaDec = getMonthlyThikadaDecimal(employee, monthFilter);
+  const periodLabel = monthFilter ? formatMonthLabel(monthFilter) : 'All Months';
 
   const bannerRow1: (string | number)[] = [
     'Employee',
     `${employee.empCode} - ${employee.name}`,
-    'Standard Shift',
-    '8h (+30m break)',
+    'Period',
+    periodLabel,
+    'Shift Rule',
+    '8h = 1 P | <8h & OT = H',
     'Sunday Rule',
-    '100% Overtime',
+    '100% OT -> H',
+    '',
     '',
   ];
 
   const bannerRow2: (string | number)[] = [
-    'Present Days',
-    `=COUNTA(A5:A${lastDataRow})`,
-    'Total Working Hours',
-    `=SUM(F5:F${lastDataRow})`,
-    'Total Overtime Hours',
+    'Present (P)',
     `=SUM(G5:G${lastDataRow})`,
-    '',
+    'Monthly Thikada (H)',
+    monthlyThikadaDec,
+    'Total Working (H)',
+    `=SUM(F5:F${lastDataRow})`,
+    'Total OT (H)',
+    `=SUM(H5:H${lastDataRow})`,
+    'Net Normal Hours (H)',
+    `=MAX(0, SUM(J5:J${lastDataRow})-D2)`,
   ];
 
-  const dataRows = empRecords.map((r) => [
-    r.date,
-    getDayNameShort(r.date),
-    formatDisplayTime(r.inTime),
-    r.outTime ? formatDisplayTime(r.outTime) : '',
-    Math.round((r.pausedTotalSeconds ?? 0) / 60),
-    r.netDecimalHours !== null ? r.netDecimalHours : '',
-    getRecordOvertimeDecimal(r),
-  ]);
+  const dataRows = empRecords.map((r) => {
+    const p = getRecordPayroll(r);
+    const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+    return [
+      r.date,
+      getDayNameShort(r.date),
+      formatDisplayTime(r.inTime),
+      r.outTime ? formatDisplayTime(r.outTime) : '',
+      Math.round((r.pausedTotalSeconds ?? 0) / 60),
+      r.netDecimalHours !== null ? r.netDecimalHours : '',
+      hasOut ? p.presentCount : '',
+      hasOut ? p.overtimeDecimalHours : '',
+      p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
+      hasOut ? p.normalDecimalHours : '',
+    ];
+  });
 
   const rows: (string | number)[][] = [
     bannerRow1,
@@ -220,6 +259,9 @@ function buildIndividualEmployeeRows(
       `=SUM(E5:E${lastDataRow})`,
       `=SUM(F5:F${lastDataRow})`,
       `=SUM(G5:G${lastDataRow})`,
+      `=SUM(H5:H${lastDataRow})`,
+      `=SUM(I5:I${lastDataRow})+D2`,
+      `=MAX(0, SUM(J5:J${lastDataRow})-D2)`,
     ]);
   }
 
@@ -237,7 +279,7 @@ async function formatSheetHeaders(
     const isIndividual = s.title !== MASTER_TAB_NAME && s.title !== EMPLOYEES_TAB_NAME;
     const headerRowIndex = isIndividual ? 3 : 0;
     const freezeCount = isIndividual ? 4 : 1;
-    const colCount = isIndividual ? 7 : s.title === MASTER_TAB_NAME ? 9 : 5;
+    const colCount = isIndividual ? 10 : s.title === MASTER_TAB_NAME ? 12 : 5;
 
     requests.push({
       updateSheetProperties: {
@@ -280,7 +322,7 @@ async function formatSheetHeaders(
             startRowIndex: 0,
             endRowIndex: 2,
             startColumnIndex: 0,
-            endColumnIndex: 7,
+            endColumnIndex: 10,
           },
           cell: {
             userEnteredFormat: {
@@ -410,7 +452,7 @@ export async function syncFullWorkbook(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: requiredTabs.map((t) => `'${t}'!A1:I5000`),
+        ranges: requiredTabs.map((t) => `'${t}'!A1:L5000`),
       }),
     }
   );
@@ -495,7 +537,7 @@ export async function syncEmployeeAndMasterTabs(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: neededTabs.map((t) => `'${t}'!A1:I5000`),
+        ranges: neededTabs.map((t) => `'${t}'!A1:L5000`),
       }),
     }
   );
@@ -528,20 +570,67 @@ export async function syncEmployeeAndMasterTabs(
 export async function createOrUpdateStandaloneEmployeeSheet(
   token: string,
   employee: Employee,
-  records: AttendanceRecord[]
+  records: AttendanceRecord[],
+  monthFilter?: string
 ): Promise<{ spreadsheetId: string; spreadsheetUrl: string }> {
   const tabTitle = 'Attendance';
+  const monthTabTitle = monthFilter ? formatMonthLabel(monthFilter) : null;
 
   if (employee.individualSheetId) {
     try {
-      const meta = await getSpreadsheetMetadata(token, employee.individualSheetId);
+      let meta = await getSpreadsheetMetadata(token, employee.individualSheetId);
       const firstTab = meta.sheets[0]?.properties.title ?? tabTitle;
+      const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
+
+      if (monthTabTitle && !existingTitles.has(monthTabTitle)) {
+        await apiFetch(
+          `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}:batchUpdate`,
+          token,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              requests: [
+                {
+                  addSheet: {
+                    properties: {
+                      title: monthTabTitle,
+                      gridProperties: { frozenRowCount: 4 },
+                    },
+                  },
+                },
+              ],
+            }),
+          }
+        );
+        meta = await getSpreadsheetMetadata(token, meta.spreadsheetId);
+        const addedMeta = meta.sheets
+          .filter((s) => s.properties.title === monthTabTitle)
+          .map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }));
+        await formatSheetHeaders(token, meta.spreadsheetId, addedMeta);
+      }
+
+      const rangesToClear = [`'${firstTab}'!A1:J5000`];
+      const dataUpdates = [
+        {
+          range: `'${firstTab}'!A1`,
+          values: buildIndividualEmployeeRows(employee, records),
+        },
+      ];
+
+      if (monthTabTitle && monthTabTitle !== firstTab) {
+        rangesToClear.push(`'${monthTabTitle}'!A1:J5000`);
+        dataUpdates.push({
+          range: `'${monthTabTitle}'!A1`,
+          values: buildIndividualEmployeeRows(employee, records, monthFilter),
+        });
+      }
+
       await apiFetch(
         `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}/values:batchClear`,
         token,
         {
           method: 'POST',
-          body: JSON.stringify({ ranges: [`'${firstTab}'!A1:G5000`] }),
+          body: JSON.stringify({ ranges: rangesToClear }),
         }
       );
       await apiFetch(
@@ -551,12 +640,7 @@ export async function createOrUpdateStandaloneEmployeeSheet(
           method: 'POST',
           body: JSON.stringify({
             valueInputOption: 'USER_ENTERED',
-            data: [
-              {
-                range: `'${firstTab}'!A1`,
-                values: buildIndividualEmployeeRows(employee, records),
-              },
-            ],
+            data: dataUpdates,
           }),
         }
       );
@@ -566,13 +650,35 @@ export async function createOrUpdateStandaloneEmployeeSheet(
     }
   }
 
+  const initialSheets = [
+    { properties: { title: tabTitle, gridProperties: { frozenRowCount: 4 } } },
+    ...(monthTabTitle
+      ? [{ properties: { title: monthTabTitle, gridProperties: { frozenRowCount: 4 } } }]
+      : []),
+  ];
+
   const created = await apiFetch<SpreadsheetMetadataResponse>(SHEETS_BASE, token, {
     method: 'POST',
     body: JSON.stringify({
       properties: { title: `${employee.empCode} - ${employee.name} Attendance` },
-      sheets: [{ properties: { title: tabTitle, gridProperties: { frozenRowCount: 4 } } }],
+      sheets: initialSheets,
     }),
   });
+
+  const dataUpdates = [
+    {
+      range: `'${tabTitle}'!A1`,
+      values: buildIndividualEmployeeRows(employee, records),
+    },
+    ...(monthTabTitle
+      ? [
+          {
+            range: `'${monthTabTitle}'!A1`,
+            values: buildIndividualEmployeeRows(employee, records, monthFilter),
+          },
+        ]
+      : []),
+  ];
 
   await apiFetch(
     `${SHEETS_BASE}/${encodeURIComponent(created.spreadsheetId)}/values:batchUpdate`,
@@ -581,20 +687,16 @@ export async function createOrUpdateStandaloneEmployeeSheet(
       method: 'POST',
       body: JSON.stringify({
         valueInputOption: 'USER_ENTERED',
-        data: [
-          {
-            range: `'${tabTitle}'!A1`,
-            values: buildIndividualEmployeeRows(employee, records),
-          },
-        ],
+        data: dataUpdates,
       }),
     }
   );
 
-  const firstSheetId = created.sheets[0]?.properties.sheetId ?? 0;
-  await formatSheetHeaders(token, created.spreadsheetId, [
-    { sheetId: firstSheetId, title: tabTitle },
-  ]);
+  await formatSheetHeaders(
+    token,
+    created.spreadsheetId,
+    created.sheets.map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }))
+  );
 
   return {
     spreadsheetId: created.spreadsheetId,
@@ -661,7 +763,7 @@ export async function importEmployeeGoogleSheet(
   }
 
   const tabTitle = targetSheet.properties.title;
-  const range = encodeURIComponent(`'${tabTitle}'!A1:I5000`);
+  const range = encodeURIComponent(`'${tabTitle}'!A1:L5000`);
   const res = await apiFetch<{ values?: string[][] }>(
     `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}/values/${range}`,
     token
@@ -673,6 +775,7 @@ export async function importEmployeeGoogleSheet(
   let inCol = 1;
   let outCol = 2;
   let awayCol = -1;
+  let thikadaCol = -1;
   let startRow = 0;
 
   for (let i = 0; i < Math.min(rows.length, 10); i += 1) {
@@ -689,6 +792,7 @@ export async function importEmployeeGoogleSheet(
       inCol = foundIn !== -1 ? foundIn : foundDate + 1;
       outCol = foundOut !== -1 ? foundOut : inCol + 1;
       awayCol = row.findIndex((c) => c.includes('away') || c.includes('pause'));
+      thikadaCol = row.findIndex((c) => c.includes('thikada') || c.includes('hikada'));
       startRow = i + 1;
       break;
     }
@@ -711,13 +815,20 @@ export async function importEmployeeGoogleSheet(
       !Number.isNaN(awayMinsRaw) && awayMinsRaw > 0 ? Math.round(awayMinsRaw) : 0;
     const pausedTotalSeconds = awayMinutes * 60;
 
+    const thikadaHrsRaw = thikadaCol !== -1 ? Number(row[thikadaCol]) : 0;
+    const thikadaMinutes =
+      !Number.isNaN(thikadaHrsRaw) && thikadaHrsRaw > 0
+        ? Math.round(thikadaHrsRaw * 60)
+        : 0;
+
     if (outTime) {
       const calc = calculateShiftMetrics(
         inTime,
         outTime,
         employee.breakMinutes || 30,
         dateIso,
-        awayMinutes
+        awayMinutes,
+        thikadaMinutes
       );
       imported.push({
         id: `${dateIso}_${employee.id}`,
@@ -737,6 +848,10 @@ export async function importEmployeeGoogleSheet(
         netDecimalHours: calc.netDecimalHours,
         overtimeMinutes: calc.overtimeMinutes,
         overtimeDecimalHours: calc.overtimeDecimalHours,
+        presentCount: calc.presentCount,
+        thikadaMinutes: calc.thikadaMinutes,
+        normalMinutes: calc.normalMinutes,
+        normalDecimalHours: calc.normalDecimalHours,
         isSunday: calc.isSunday,
         status: calc.status,
         syncedToSheet: true,
@@ -761,6 +876,10 @@ export async function importEmployeeGoogleSheet(
         netDecimalHours: null,
         overtimeMinutes: null,
         overtimeDecimalHours: null,
+        presentCount: null,
+        thikadaMinutes,
+        normalMinutes: null,
+        normalDecimalHours: null,
         isSunday: isSundayISO(dateIso),
         status: 'on_duty',
         syncedToSheet: true,
@@ -793,7 +912,7 @@ export async function loadWorkbookData(
     rangesToFetch.push(`'${EMPLOYEES_TAB_NAME}'!A2:E2000`);
   }
   if (tabNames.includes(MASTER_TAB_NAME)) {
-    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:I5000`);
+    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:L5000`);
   }
 
   const employees: Employee[] = [];
@@ -825,23 +944,30 @@ export async function loadWorkbookData(
         }
       } else if (vr.range.includes(MASTER_TAB_NAME)) {
         const header = (rows[0] ?? []).map((c) => String(c || '').trim().toLowerCase());
-        const isNineCol = header.includes('day') || header.includes('overtime hours');
+        const hasDayCol = header.includes('day');
+        const thikadaCol = header.findIndex((c) => c.includes('thikada'));
         for (const row of rows.slice(1)) {
           const date = normalizeDateToISO(row[0]);
-          const empCode = String((isNineCol ? row[2] : row[1]) || '').trim();
-          const empName = String((isNineCol ? row[3] : row[2]) || '').trim();
+          const empCode = String((hasDayCol ? row[2] : row[1]) || '').trim();
+          const empName = String((hasDayCol ? row[3] : row[2]) || '').trim();
           if (!date || !empCode) continue;
 
           const inTime =
-            parseDisplayTimeToHHMM(isNineCol ? row[4] : row[3]) || '09:00';
-          const outTime = parseDisplayTimeToHHMM(isNineCol ? row[5] : row[4]);
-          const awayMins = isNineCol && !Number.isNaN(Number(row[6])) ? Math.max(0, Number(row[6])) : 0;
+            parseDisplayTimeToHHMM(hasDayCol ? row[4] : row[3]) || '09:00';
+          const outTime = parseDisplayTimeToHHMM(hasDayCol ? row[5] : row[4]);
+          const awayMins =
+            hasDayCol && !Number.isNaN(Number(row[6])) ? Math.max(0, Number(row[6])) : 0;
+          const thikadaHrs =
+            thikadaCol !== -1 && !Number.isNaN(Number(row[thikadaCol]))
+              ? Math.max(0, Number(row[thikadaCol]))
+              : 0;
+          const thikadaMinutes = Math.round(thikadaHrs * 60);
           const matchedEmp = employees.find((e) => e.empCode === empCode);
           const empId =
             matchedEmp?.id || `emp-${empCode.toLowerCase().replace(/[^a-z0-9_-]/g, '')}`;
 
           if (outTime) {
-            const calc = calculateShiftMetrics(inTime, outTime, 30, date, awayMins);
+            const calc = calculateShiftMetrics(inTime, outTime, 30, date, awayMins, thikadaMinutes);
             records.push({
               id: `${date}_${empId}`,
               date,
@@ -860,6 +986,10 @@ export async function loadWorkbookData(
               netDecimalHours: calc.netDecimalHours,
               overtimeMinutes: calc.overtimeMinutes,
               overtimeDecimalHours: calc.overtimeDecimalHours,
+              presentCount: calc.presentCount,
+              thikadaMinutes: calc.thikadaMinutes,
+              normalMinutes: calc.normalMinutes,
+              normalDecimalHours: calc.normalDecimalHours,
               isSunday: calc.isSunday,
               status: calc.status,
               syncedToSheet: true,
@@ -884,6 +1014,10 @@ export async function loadWorkbookData(
               netDecimalHours: null,
               overtimeMinutes: null,
               overtimeDecimalHours: null,
+              presentCount: null,
+              thikadaMinutes,
+              normalMinutes: null,
+              normalDecimalHours: null,
               isSunday: isSundayISO(date),
               status: 'on_duty',
               syncedToSheet: true,

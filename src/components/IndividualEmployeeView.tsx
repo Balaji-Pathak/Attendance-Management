@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   CalendarPlus,
+  Check,
   Download,
+  Edit3,
   ExternalLink,
   FileSpreadsheet,
   FolderInput,
+  History,
   RefreshCw,
   UserCheck,
   X,
@@ -15,10 +18,11 @@ import {
   downloadCSV,
   formatDisplayTime,
   formatDurationHM,
+  formatMonthLabel,
   getDayNameShort,
   getEmployeeSheetTabName,
   getMonthDays,
-  isSundayISO,
+  getRecordPayroll,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -28,12 +32,19 @@ interface IndividualEmployeeViewProps {
   sheetConfig: SheetConfig | null;
   isGoogleAuthed: boolean;
   onRequestSyncEmployeeTab: (employee: Employee) => void;
-  onRequestStandaloneSheet: (employee: Employee) => void;
+  onRequestStandaloneSheet: (employee: Employee, monthFilter?: string) => void;
   onImportEmployeeSheet: (employee: Employee, sheetUrlOrId: string) => Promise<void>;
   onSaveEmployeeMonthRecords: (
     employee: Employee,
     monthRecords: AttendanceRecord[],
-    syncToStandaloneSheet: boolean
+    syncToStandaloneSheet: boolean,
+    monthFilter?: string
+  ) => Promise<void>;
+  onUpdateSingleRecord: (updated: AttendanceRecord) => Promise<void>;
+  onSaveMonthlyThikada: (
+    employee: Employee,
+    yearMonth: string,
+    thikadaMinutes: number
   ) => Promise<void>;
 }
 
@@ -45,12 +56,18 @@ interface MonthBuilderRow {
   inTime: string;
   outTime: string;
   awayMinutes: number;
+  thikadaHours: number;
 }
 
 function getPreviousYearMonth(): string {
   const now = new Date();
   const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function getCurrentYearMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
 export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
@@ -62,14 +79,23 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   onRequestStandaloneSheet,
   onImportEmployeeSheet,
   onSaveEmployeeMonthRecords,
+  onUpdateSingleRecord,
+  onSaveMonthlyThikada,
 }) => {
   const [selectedEmpId, setSelectedEmpId] = useState<string>(employees[0]?.id ?? '');
-  const [monthFilter, setMonthFilter] = useState<string>('all');
 
   // Import existing Google Sheet UI state
   const [showImportPanel, setShowImportPanel] = useState(false);
   const [importSheetInput, setImportSheetInput] = useState('');
   const [isImportingSheet, setIsImportingSheet] = useState(false);
+
+  // History Attendance Modal state
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [historyMonth, setHistoryMonth] = useState<string>(() => getCurrentYearMonth());
+  const [monthlyThikadaHoursInput, setMonthlyThikadaHoursInput] = useState<string>('0');
+  const [savingMonthlyThikada, setSavingMonthlyThikada] = useState(false);
+  const [editingRow, setEditingRow] = useState<AttendanceRecord | null>(null);
+  const [savingRowEdit, setSavingRowEdit] = useState(false);
 
   // Previous Month Bulk Builder Modal state
   const [showMonthBuilder, setShowMonthBuilder] = useState(false);
@@ -77,6 +103,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const [defaultInTime, setDefaultInTime] = useState('09:00');
   const [defaultOutTime, setDefaultOutTime] = useState('17:30');
   const [defaultAwayMins, setDefaultAwayMins] = useState(0);
+  const [defaultThikadaHours, setDefaultThikadaHours] = useState(0);
   const [includeSundays, setIncludeSundays] = useState(false);
   const [builderRows, setBuilderRows] = useState<MonthBuilderRow[]>([]);
   const [syncBuilderToSheet, setSyncBuilderToSheet] = useState(true);
@@ -86,64 +113,154 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     return employees.find((e) => e.id === selectedEmpId) ?? employees[0] ?? null;
   }, [employees, selectedEmpId]);
 
-  const monthOptions = useMemo(() => {
-    const months = new Set<string>();
-    for (const r of records) {
-      if (r.date && r.date.length >= 7) {
-        months.add(r.date.slice(0, 7));
-      }
-    }
-    return Array.from(months).sort((a, b) => b.localeCompare(a));
-  }, [records]);
-
-  const empRecords = useMemo(() => {
+  const allEmployeeRecords = useMemo(() => {
     if (!selectedEmployee) return [];
     return records
-      .filter(
-        (r) =>
-          (r.empId === selectedEmployee.id || r.empCode === selectedEmployee.empCode) &&
-          (monthFilter === 'all' || r.date.startsWith(monthFilter))
-      )
+      .filter((r) => r.empId === selectedEmployee.id || r.empCode === selectedEmployee.empCode)
       .sort((a, b) => {
         if (a.date !== b.date) return b.date.localeCompare(a.date);
         return b.inTime.localeCompare(a.inTime);
       });
-  }, [records, selectedEmployee, monthFilter]);
+  }, [records, selectedEmployee]);
 
-  const summary = useMemo(() => {
-    let totalAwayMins = 0;
-    let net = 0;
-    let overtimeMinutes = 0;
-    let completed = 0;
-    const uniqueDays = new Set<string>();
+  // Group saved records by YYYY-MM for clean Overview cards (no giant raw table below)
+  const savedMonthSummaries = useMemo(() => {
+    if (!selectedEmployee) return [];
+    const byMonth = new Map<string, AttendanceRecord[]>();
+    for (const r of allEmployeeRecords) {
+      const ym = r.date.slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      const list = byMonth.get(ym) ?? [];
+      list.push(r);
+      byMonth.set(ym, list);
+    }
 
-    for (const r of empRecords) {
-      uniqueDays.add(r.date);
-      totalAwayMins += Math.round((r.pausedTotalSeconds ?? 0) / 60);
-      if (r.outTime && r.netMinutes !== null) {
-        net += r.netMinutes;
-        const isSun = r.isSunday ?? isSundayISO(r.date);
-        const otMins =
-          typeof r.overtimeMinutes === 'number'
-            ? r.overtimeMinutes
-            : isSun
-            ? r.netMinutes
-            : Math.max(0, r.netMinutes - 480);
-        overtimeMinutes += otMins;
-        completed += 1;
+    const months = Array.from(byMonth.keys()).sort((a, b) => b.localeCompare(a));
+    return months.map((ym) => {
+      const list = byMonth.get(ym) ?? [];
+      let netMinutes = 0;
+      let presentCount = 0;
+      let overtimeMinutes = 0;
+      let dayThikadaMinutes = 0;
+      let grossNormalBeforeDayThikada = 0;
+
+      for (const r of list) {
+        if (r.outTime && r.netMinutes !== null) {
+          netMinutes += r.netMinutes;
+          const p = getRecordPayroll(r);
+          presentCount += p.presentCount;
+          overtimeMinutes += p.overtimeMinutes;
+          dayThikadaMinutes += p.thikadaMinutes;
+          grossNormalBeforeDayThikada += p.grossNormalMinutes;
+        }
       }
+
+      const monthThikadaMinutes = selectedEmployee.monthlyThikadaMinutes?.[ym] ?? 0;
+      const totalThikadaMinutes = dayThikadaMinutes + monthThikadaMinutes;
+      const netNormalMinutes = Math.max(0, grossNormalBeforeDayThikada - totalThikadaMinutes);
+
+      return {
+        yearMonth: ym,
+        label: formatMonthLabel(ym),
+        entries: list.length,
+        presentCount,
+        netMinutes,
+        netDecimal: Number((netMinutes / 60).toFixed(2)),
+        overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
+        totalThikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
+        netNormalMinutes,
+        netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
+      };
+    });
+  }, [allEmployeeRecords, selectedEmployee]);
+
+  const overallSummary = useMemo(() => {
+    let presentCount = 0;
+    let netMinutes = 0;
+    let totalThikadaMinutes = 0;
+    let netNormalMinutes = 0;
+
+    for (const m of savedMonthSummaries) {
+      presentCount += m.presentCount;
+      netMinutes += m.netMinutes;
+      totalThikadaMinutes += Math.round(m.totalThikadaDecimal * 60);
+      netNormalMinutes += m.netNormalMinutes;
     }
 
     return {
-      daysWorked: uniqueDays.size,
+      presentCount,
+      netDecimal: Number((netMinutes / 60).toFixed(2)),
+      thikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
+      netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
+      monthsCount: savedMonthSummaries.length,
+    };
+  }, [savedMonthSummaries]);
+
+  // History Attendance modal records for selected historyMonth
+  const historyMonthRecords = useMemo(() => {
+    if (!selectedEmployee || !historyMonth) return [];
+    return allEmployeeRecords
+      .filter((r) => r.date.startsWith(historyMonth))
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        return a.inTime.localeCompare(b.inTime);
+      });
+  }, [allEmployeeRecords, selectedEmployee, historyMonth]);
+
+  const historyTotals = useMemo(() => {
+    let totalAwayMins = 0;
+    let netMinutes = 0;
+    let presentCount = 0;
+    let overtimeMinutes = 0;
+    let dayThikadaMinutes = 0;
+    let grossNormalBeforeDayThikada = 0;
+
+    for (const r of historyMonthRecords) {
+      totalAwayMins += Math.round((r.pausedTotalSeconds ?? 0) / 60);
+      if (r.outTime && r.netMinutes !== null) {
+        netMinutes += r.netMinutes;
+        const p = getRecordPayroll(r);
+        presentCount += p.presentCount;
+        overtimeMinutes += p.overtimeMinutes;
+        dayThikadaMinutes += p.thikadaMinutes;
+        grossNormalBeforeDayThikada += p.grossNormalMinutes;
+      }
+    }
+
+    const monthlyThikadaMinutes = selectedEmployee?.monthlyThikadaMinutes?.[historyMonth] ?? 0;
+    const totalThikadaMinutes = dayThikadaMinutes + monthlyThikadaMinutes;
+    const dayNetNormalTotal = historyMonthRecords.reduce(
+      (sum, r) => sum + (r.outTime && r.netMinutes !== null ? getRecordPayroll(r).normalMinutes : 0),
+      0
+    );
+    const finalNetNormalMinutes = Math.max(0, dayNetNormalTotal - monthlyThikadaMinutes);
+
+    return {
+      entries: historyMonthRecords.length,
       totalAwayMins,
-      net,
-      netDecimal: Number((net / 60).toFixed(2)),
+      netMinutes,
+      netDecimal: Number((netMinutes / 60).toFixed(2)),
+      presentCount,
       overtimeMinutes,
       overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
-      avgNet: completed > 0 ? Math.round(net / completed) : 0,
+      dayThikadaMinutes,
+      dayThikadaDecimal: Number((dayThikadaMinutes / 60).toFixed(2)),
+      monthlyThikadaMinutes,
+      monthlyThikadaDecimal: Number((monthlyThikadaMinutes / 60).toFixed(2)),
+      totalThikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
+      grossNormalDecimal: Number((grossNormalBeforeDayThikada / 60).toFixed(2)),
+      finalNetNormalMinutes,
+      finalNetNormalDecimal: Number((finalNetNormalMinutes / 60).toFixed(2)),
     };
-  }, [empRecords]);
+  }, [historyMonthRecords, selectedEmployee, historyMonth]);
+
+  // Sync monthly thikada input whenever history modal month/employee changes
+  useEffect(() => {
+    if (!selectedEmployee) return;
+    const mins = selectedEmployee.monthlyThikadaMinutes?.[historyMonth] ?? 0;
+    setMonthlyThikadaHoursInput(String(Number((mins / 60).toFixed(2))));
+    setEditingRow(null);
+  }, [selectedEmployee, historyMonth, showHistoryModal]);
 
   // Populate builder rows whenever modal opens or selected employee/month changes
   useEffect(() => {
@@ -171,6 +288,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             inTime: existing.inTime,
             outTime: existing.outTime || defaultOutTime,
             awayMinutes: Math.round((existing.pausedTotalSeconds ?? 0) / 60),
+            thikadaHours: Number(((existing.thikadaMinutes ?? 0) / 60).toFixed(2)),
           };
         }
         return {
@@ -181,10 +299,19 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           inTime: defaultInTime,
           outTime: defaultOutTime,
           awayMinutes: defaultAwayMins,
+          thikadaHours: defaultThikadaHours,
         };
       })
     );
   }, [showMonthBuilder, builderMonth, selectedEmployee?.id]);
+
+  const handleOpenHistoryModal = (targetMonth?: string) => {
+    const fallbackMonth =
+      targetMonth || savedMonthSummaries[0]?.yearMonth || getCurrentYearMonth();
+    setHistoryMonth(fallbackMonth);
+    setShowHistoryModal(true);
+    setShowImportPanel(false);
+  };
 
   const handleApplyDefaultsToMonth = () => {
     setBuilderRows((prev) =>
@@ -194,18 +321,27 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         inTime: defaultInTime,
         outTime: defaultOutTime,
         awayMinutes: defaultAwayMins,
+        thikadaHours: defaultThikadaHours,
       }))
     );
   };
 
   const builderTotals = useMemo(() => {
     if (!selectedEmployee) {
-      return { presentDays: 0, netMinutes: 0, overtimeMinutes: 0 };
+      return {
+        selectedDays: 0,
+        presentCount: 0,
+        netMinutes: 0,
+        thikadaMinutes: 0,
+        normalMinutes: 0,
+      };
     }
     const breakMins = selectedEmployee.breakMinutes || 30;
-    let presentDays = 0;
+    let selectedDays = 0;
+    let presentCount = 0;
     let netMinutes = 0;
-    let overtimeMinutes = 0;
+    let thikadaMinutes = 0;
+    let normalMinutes = 0;
 
     for (const row of builderRows) {
       if (!row.present || !row.inTime || !row.outTime) continue;
@@ -214,13 +350,16 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         row.outTime,
         breakMins,
         row.date,
-        row.awayMinutes
+        row.awayMinutes,
+        Math.round(Math.max(0, row.thikadaHours) * 60)
       );
-      presentDays += 1;
+      selectedDays += 1;
+      presentCount += calc.presentCount;
       netMinutes += calc.netMinutes;
-      overtimeMinutes += calc.overtimeMinutes;
+      thikadaMinutes += calc.thikadaMinutes;
+      normalMinutes += calc.normalMinutes;
     }
-    return { presentDays, netMinutes, overtimeMinutes };
+    return { selectedDays, presentCount, netMinutes, thikadaMinutes, normalMinutes };
   }, [builderRows, selectedEmployee]);
 
   const handleSaveBuilderMonth = async () => {
@@ -230,12 +369,14 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
     for (const row of builderRows) {
       if (!row.present || !row.inTime || !row.outTime) continue;
+      const thikadaMins = Math.round(Math.max(0, row.thikadaHours) * 60);
       const calc = calculateShiftMetrics(
         row.inTime,
         row.outTime,
         breakMins,
         row.date,
-        row.awayMinutes
+        row.awayMinutes,
+        thikadaMins
       );
       builtRecords.push({
         id: `${row.date}_${selectedEmployee.id}`,
@@ -255,6 +396,10 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         netDecimalHours: calc.netDecimalHours,
         overtimeMinutes: calc.overtimeMinutes,
         overtimeDecimalHours: calc.overtimeDecimalHours,
+        presentCount: calc.presentCount,
+        thikadaMinutes: calc.thikadaMinutes,
+        normalMinutes: calc.normalMinutes,
+        normalDecimalHours: calc.normalDecimalHours,
         isSunday: calc.isSunday,
         status: calc.status,
         syncedToSheet: false,
@@ -269,9 +414,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       await onSaveEmployeeMonthRecords(
         selectedEmployee,
         builtRecords,
-        isGoogleAuthed && syncBuilderToSheet
+        isGoogleAuthed && syncBuilderToSheet,
+        builderMonth
       );
-      setMonthFilter(builderMonth);
       setShowMonthBuilder(false);
     } finally {
       setIsSavingMonth(false);
@@ -291,19 +436,48 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     }
   };
 
-  const handleExportEmployeeCSV = () => {
+  const handleSaveRowEdit = async () => {
+    if (!editingRow) return;
+    setSavingRowEdit(true);
+    try {
+      await onUpdateSingleRecord(editingRow);
+      setEditingRow(null);
+    } finally {
+      setSavingRowEdit(false);
+    }
+  };
+
+  const handleSaveMonthlyThikadaClick = async () => {
+    if (!selectedEmployee || !historyMonth) return;
+    const hrs = Math.max(0, Number(monthlyThikadaHoursInput) || 0);
+    const mins = Math.round(hrs * 60);
+    setSavingMonthlyThikada(true);
+    try {
+      await onSaveMonthlyThikada(selectedEmployee, historyMonth, mins);
+    } finally {
+      setSavingMonthlyThikada(false);
+    }
+  };
+
+  const handleExportMonthCSV = (month: string, rows: AttendanceRecord[]) => {
     if (!selectedEmployee) return;
     downloadCSV(
-      `${selectedEmployee.empCode}-${selectedEmployee.name.replace(/\s+/g, '-')}.csv`,
-      ['Date', 'Day', 'In Time', 'Out Time', 'Away (mins)', 'Working Hours', 'Overtime Hours'],
-      empRecords.map((r) => {
-        const isSun = r.isSunday ?? isSundayISO(r.date);
-        const otDec =
-          typeof r.overtimeDecimalHours === 'number'
-            ? r.overtimeDecimalHours
-            : r.netMinutes !== null
-            ? Number(((isSun ? r.netMinutes : Math.max(0, r.netMinutes - 480)) / 60).toFixed(2))
-            : '';
+      `${selectedEmployee.empCode}-${selectedEmployee.name.replace(/\s+/g, '-')}-${month}.csv`,
+      [
+        'Date',
+        'Day',
+        'In Time',
+        'Out Time',
+        'Away (mins)',
+        'Working Hours',
+        'Present (P)',
+        'Overtime (hrs)',
+        'Thikada (hrs)',
+        'Normal Hours (H)',
+      ],
+      rows.map((r) => {
+        const p = getRecordPayroll(r);
+        const hasOut = Boolean(r.outTime && r.netMinutes !== null);
         return [
           r.date,
           getDayNameShort(r.date),
@@ -311,7 +485,10 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           r.outTime ? formatDisplayTime(r.outTime) : '',
           Math.round((r.pausedTotalSeconds ?? 0) / 60),
           r.netDecimalHours !== null ? r.netDecimalHours : '',
-          otDec,
+          hasOut ? p.presentCount : '',
+          hasOut ? p.overtimeDecimalHours : '',
+          p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
+          hasOut ? p.normalDecimalHours : '',
         ];
       })
     );
@@ -394,33 +571,31 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 {selectedEmployee.name}
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                8h standard shift (+30m break) · &gt;8h &amp; Sunday 100% counted as Overtime
+                8h+ Mon–Sat = 1 Present (P) · &lt;8h, Overtime (&gt;8h) &amp; Sunday = Normal Hours
+                (H) · Thikada deducted from H
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
-              <select
-                value={monthFilter}
-                onChange={(e) => setMonthFilter(e.target.value)}
-                aria-label="Filter by month"
-                className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-800 focus:border-teal-700 focus:outline-none"
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleOpenHistoryModal()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-800 whitespace-nowrap shrink-0"
               >
-                <option value="all">All Months</option>
-                {monthOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                <History className="h-3.5 w-3.5" />
+                <span>History Attendance</span>
+              </button>
 
               <button
                 type="button"
-                onClick={handleExportEmployeeCSV}
-                disabled={empRecords.length === 0}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
+                onClick={() => {
+                  setShowMonthBuilder(true);
+                  setShowImportPanel(false);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
               >
-                <Download className="h-3.5 w-3.5" />
-                <span>Export CSV</span>
+                <CalendarPlus className="h-3.5 w-3.5" />
+                <span>Build Month History</span>
               </button>
             </div>
           </div>
@@ -433,18 +608,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowMonthBuilder(true);
-                  setShowImportPanel(false);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-teal-700 bg-teal-50 px-3.5 py-2 text-xs font-medium text-teal-900 hover:bg-teal-100 whitespace-nowrap shrink-0"
-              >
-                <CalendarPlus className="h-3.5 w-3.5" />
-                <span>Build Month History</span>
-              </button>
-
               <button
                 type="button"
                 onClick={() => {
@@ -511,8 +674,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   </h3>
                   <p className="mt-0.5 text-xs text-slate-600">
                     Paste a Google Sheet URL or ID containing Date, In Time, and Out Time columns.
-                    GateLog will extract entries, deduct 30m break, calculate overtime (&gt;8h &amp;
-                    Sundays 100%), and save to history.
+                    GateLog extracts Present (P) for 8h+ shifts, routes &lt;8h &amp; overtime/Sunday
+                    hours into Normal Hours (H), deducts any Thikada column, and saves to history.
                   </p>
                 </div>
                 <button
@@ -555,156 +718,593 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
         <section className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Present Days</div>
+            <div className="text-xs font-medium text-slate-500">Total Present (P)</div>
             <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
-              {summary.daysWorked}
+              {overallSummary.presentCount}
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+            <div className="text-xs font-medium text-slate-500">Net Normal Hours (H)</div>
+            <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
+              {overallSummary.netNormalDecimal.toFixed(2)}h
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+            <div className="text-xs font-medium text-slate-500">Thikada Deducted</div>
+            <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-700 tabular-nums">
+              {overallSummary.thikadaDecimal.toFixed(2)}h
             </div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
             <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
             <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
-              {summary.netDecimal.toFixed(2)}h
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Total Overtime Hours</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
-              {summary.overtimeDecimal.toFixed(2)}h
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Avg / Shift</div>
-            <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
-              {formatDurationHM(summary.avgNet)}
+              {overallSummary.netDecimal.toFixed(2)}h
             </div>
           </div>
         </section>
 
+        {/* Clean Monthly Overview (Individual daily rows open via History Attendance button) */}
         <section className="rounded-xl border border-slate-200 bg-white">
-          <div className="border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-slate-900">
-              Individual Attendance Sheet
-            </h3>
-            <span className="text-xs text-slate-500 font-mono tabular-nums">
-              {empRecords.length} {empRecords.length === 1 ? 'entry' : 'entries'}
-            </span>
+          <div className="border-b border-slate-200 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Saved Monthly Summaries</h3>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Click <span className="font-medium text-slate-700">History Attendance</span> to
+                inspect any month&apos;s day-by-day sheet, deduct Thikada hours, or export to Google
+                Sheets.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => handleOpenHistoryModal()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-teal-700 bg-teal-50 px-3.5 py-2 text-xs font-medium text-teal-900 hover:bg-teal-100 whitespace-nowrap"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>Open History Attendance</span>
+            </button>
           </div>
 
-          {empRecords.length === 0 ? (
+          {savedMonthSummaries.length === 0 ? (
             <div className="px-6 py-12 text-center text-sm text-slate-500">
-              No attendance entries recorded for {selectedEmployee.name} yet. Use{' '}
+              No attendance history saved for {selectedEmployee.name} yet. Click{' '}
               <span className="font-medium text-slate-700">Build Month History</span> or{' '}
-              <span className="font-medium text-slate-700">Import Google Sheet</span> to add past
-              months.
+              <span className="font-medium text-slate-700">Import Google Sheet</span> to add
+              monthly records.
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/80 text-xs font-medium text-slate-500">
-                    <th className="px-6 py-3 whitespace-nowrap">Date</th>
-                    <th className="px-4 py-3 whitespace-nowrap">Day</th>
-                    <th className="px-4 py-3 whitespace-nowrap">In Time</th>
-                    <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
-                    <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
-                    <th className="px-4 py-3 text-right whitespace-nowrap">Working (-30m)</th>
+                    <th className="px-6 py-3 whitespace-nowrap">Month</th>
+                    <th className="px-4 py-3 text-center whitespace-nowrap">Present (P)</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Overtime</th>
-                    <th className="px-6 py-3 text-right whitespace-nowrap">Status</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">Thikada Deducted</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">Net Normal (H)</th>
+                    <th className="px-6 py-3 text-right whitespace-nowrap">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {empRecords.map((r) => {
-                    const dayShort = getDayNameShort(r.date);
-                    const isSun = r.isSunday ?? isSundayISO(r.date);
-                    const awayMins = Math.round((r.pausedTotalSeconds ?? 0) / 60);
-                    const otMins =
-                      typeof r.overtimeMinutes === 'number'
-                        ? r.overtimeMinutes
-                        : r.netMinutes !== null
-                        ? isSun
-                          ? r.netMinutes
-                          : Math.max(0, r.netMinutes - 480)
-                        : null;
-                    const otDec =
-                      typeof r.overtimeDecimalHours === 'number'
-                        ? r.overtimeDecimalHours
-                        : otMins !== null
-                        ? Number((otMins / 60).toFixed(2))
-                        : null;
-
-                    return (
-                      <tr key={r.id} className="hover:bg-slate-50/80">
-                        <td className="px-6 py-3 font-mono text-xs text-slate-800 tabular-nums whitespace-nowrap">
-                          {r.date}
-                        </td>
-                        <td className="px-4 py-3 text-xs whitespace-nowrap">
-                          <span
-                            className={
-                              isSun
-                                ? 'font-semibold text-amber-700'
-                                : 'text-slate-600'
-                            }
+                  {savedMonthSummaries.map((m) => (
+                    <tr key={m.yearMonth} className="hover:bg-slate-50/80">
+                      <td className="px-6 py-3.5 font-medium text-slate-900 whitespace-nowrap">
+                        <div>{m.label}</div>
+                        <div className="text-[11px] font-mono text-slate-400">
+                          {m.yearMonth} · {m.entries} entries
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-center font-mono text-xs font-semibold text-teal-800 tabular-nums whitespace-nowrap">
+                        {m.presentCount} P
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-800 tabular-nums whitespace-nowrap">
+                        {m.netDecimal.toFixed(2)}h
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
+                        {m.overtimeDecimal.toFixed(2)}h
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
+                        {m.totalThikadaDecimal > 0
+                          ? `-${m.totalThikadaDecimal.toFixed(2)}h`
+                          : '0.00h'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-amber-700 tabular-nums whitespace-nowrap">
+                        {m.netNormalDecimal.toFixed(2)}h
+                      </td>
+                      <td className="px-6 py-3.5 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenHistoryModal(m.yearMonth)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-100"
                           >
-                            {dayShort}
-                            {isSun ? ' · OT' : ''}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
-                          {formatDisplayTime(r.inTime)}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
-                          {r.outTime ? formatDisplayTime(r.outTime) : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
-                          {awayMins > 0 ? `${awayMins}m` : '0m'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap">
-                          {r.netMinutes !== null
-                            ? `${formatDurationHM(r.netMinutes)} · ${r.netDecimalHours?.toFixed(2)}h`
-                            : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
-                          {otMins !== null && otMins > 0 ? (
-                            <span className="text-amber-700">
-                              +{formatDurationHM(otMins)} · {otDec?.toFixed(2)}h
-                            </span>
-                          ) : (
-                            <span className="text-slate-400">0.00h</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-3 text-right whitespace-nowrap">
-                          <StatusLabel status={r.status} />
-                        </td>
-                      </tr>
-                    );
-                  })}
+                            <History className="h-3.5 w-3.5" />
+                            <span>View History</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onRequestStandaloneSheet(selectedEmployee, m.yearMonth)
+                            }
+                            disabled={!isGoogleAuthed}
+                            className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
+                          >
+                            <FileSpreadsheet className="h-3.5 w-3.5" />
+                            <span>Sheet</span>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
-                <tfoot>
-                  <tr className="border-t-2 border-slate-200 bg-slate-50 font-mono text-xs font-semibold text-slate-900">
-                    <td className="px-6 py-3 whitespace-nowrap">TOTAL</td>
-                    <td className="px-4 py-3 whitespace-nowrap text-slate-700">
-                      {summary.daysWorked} Days
-                    </td>
-                    <td className="px-4 py-3" />
-                    <td className="px-4 py-3" />
-                    <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap text-slate-600">
-                      {summary.totalAwayMins}m
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap text-teal-800">
-                      {formatDurationHM(summary.net)} · {summary.netDecimal.toFixed(2)}h
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap text-amber-700">
-                      {formatDurationHM(summary.overtimeMinutes)} ·{' '}
-                      {summary.overtimeDecimal.toFixed(2)}h
-                    </td>
-                    <td className="px-6 py-3" />
-                  </tr>
-                </tfoot>
               </table>
             </div>
           )}
         </section>
       </div>
+
+      {/* History Attendance Modal */}
+      {showHistoryModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="history-attendance-title"
+        >
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-6 py-4">
+              <div>
+                <h3
+                  id="history-attendance-title"
+                  className="text-base font-semibold text-slate-900"
+                >
+                  History Attendance — {selectedEmployee.name} ({selectedEmployee.empCode})
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Select a month to view records, edit Thikada deductions, or create this month&apos;s
+                  Google Sheet.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHistoryModal(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close history modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Month Selection Bar */}
+            <div className="border-b border-slate-200 bg-slate-50 px-6 py-3.5 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <label
+                  htmlFor="history-month-picker"
+                  className="text-xs font-medium text-slate-700"
+                >
+                  Select Month:
+                </label>
+                <input
+                  id="history-month-picker"
+                  type="month"
+                  value={historyMonth}
+                  onChange={(e) => setHistoryMonth(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                />
+                {savedMonthSummaries.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {savedMonthSummaries.map((m) => (
+                      <button
+                        key={m.yearMonth}
+                        type="button"
+                        onClick={() => setHistoryMonth(m.yearMonth)}
+                        className={`rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition-colors ${
+                          historyMonth === m.yearMonth
+                            ? 'bg-slate-900 text-white'
+                            : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {m.yearMonth}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="text-xs font-medium text-slate-600">
+                {formatMonthLabel(historyMonth)}
+              </div>
+            </div>
+
+            {historyMonthRecords.length === 0 ? (
+              <div className="flex-1 px-6 py-16 text-center">
+                <p className="text-base font-semibold text-slate-900">
+                  No attendance data found for {formatMonthLabel(historyMonth)}
+                </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Select another month above or build {formatMonthLabel(historyMonth)} attendance for{' '}
+                  {selectedEmployee.name}.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBuilderMonth(historyMonth);
+                    setShowHistoryModal(false);
+                    setShowMonthBuilder(true);
+                  }}
+                  className="mt-5 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
+                >
+                  <CalendarPlus className="h-3.5 w-3.5" />
+                  <span>Build {formatMonthLabel(historyMonth)} History</span>
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Monthly Summary + Thikada Deduction Control */}
+                <div className="border-b border-slate-200 bg-white px-6 py-4 grid grid-cols-1 gap-4 md:grid-cols-12 items-center">
+                  <div className="md:col-span-7 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div className="text-slate-500">Present (P)</div>
+                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-900 tabular-nums">
+                        {historyTotals.presentCount}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div className="text-slate-500">Gross Normal (H)</div>
+                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-800 tabular-nums">
+                        {historyTotals.grossNormalDecimal.toFixed(2)}h
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div className="text-slate-500">Total Thikada</div>
+                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-700 tabular-nums">
+                        -{historyTotals.totalThikadaDecimal.toFixed(2)}h
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                      <div className="text-amber-900 font-medium">Final Normal (H)</div>
+                      <div className="mt-0.5 font-mono text-base font-bold text-amber-800 tabular-nums">
+                        {historyTotals.finalNetNormalDecimal.toFixed(2)}h
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[11px] font-semibold text-slate-800">
+                      Deduct Monthly Thikada Hours (from Normal Hours H)
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={744}
+                        step={0.25}
+                        value={monthlyThikadaHoursInput}
+                        onChange={(e) => setMonthlyThikadaHoursInput(e.target.value)}
+                        aria-label="Monthly Thikada hours deduction"
+                        className="w-28 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
+                      />
+                      <span className="text-xs text-slate-500">hrs</span>
+                      <button
+                        type="button"
+                        onClick={handleSaveMonthlyThikadaClick}
+                        disabled={savingMonthlyThikada}
+                        className="ml-auto rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
+                      >
+                        {savingMonthlyThikada ? 'Saving...' : 'Apply Thikada'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Day-by-Day Monthly Table */}
+                <div className="flex-1 overflow-auto">
+                  <table className="w-full border-collapse text-left text-xs">
+                    <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-500 z-10">
+                      <tr>
+                        <th className="px-4 py-2.5 font-medium whitespace-nowrap">Date</th>
+                        <th className="px-3 py-2.5 font-medium whitespace-nowrap">Day</th>
+                        <th className="px-3 py-2.5 font-medium whitespace-nowrap">In Time</th>
+                        <th className="px-3 py-2.5 font-medium whitespace-nowrap">Out Time</th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
+                          Away
+                        </th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
+                          Working
+                        </th>
+                        <th className="px-3 py-2.5 font-medium text-center whitespace-nowrap">P</th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">OT</th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
+                          Thikada
+                        </th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
+                          Normal (H)
+                        </th>
+                        <th className="px-3 py-2.5 font-medium whitespace-nowrap">Status</th>
+                        <th className="px-4 py-2.5 font-medium text-right whitespace-nowrap">
+                          Edit
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {historyMonthRecords.map((r) => {
+                        const isEditingThis = editingRow?.id === r.id;
+                        const activeRow = isEditingThis && editingRow ? editingRow : r;
+                        const dayShort = getDayNameShort(r.date);
+                        const awayMins = Math.round((activeRow.pausedTotalSeconds ?? 0) / 60);
+
+                        const previewCalc =
+                          isEditingThis && editingRow && editingRow.outTime
+                            ? calculateShiftMetrics(
+                                editingRow.inTime,
+                                editingRow.outTime,
+                                editingRow.breakMinutes,
+                                editingRow.date,
+                                awayMins,
+                                editingRow.thikadaMinutes ?? 0
+                              )
+                            : null;
+
+                        const p = getRecordPayroll(r);
+                        const hasOut = Boolean(activeRow.outTime && (previewCalc || r.netMinutes !== null));
+                        const displayNet = previewCalc
+                          ? previewCalc.netDecimalHours
+                          : r.netDecimalHours;
+                        const displayP = previewCalc ? previewCalc.presentCount : p.presentCount;
+                        const displayOT = previewCalc
+                          ? previewCalc.overtimeDecimalHours
+                          : p.overtimeDecimalHours;
+                        const displayThikada = previewCalc
+                          ? previewCalc.thikadaDecimalHours
+                          : p.thikadaDecimalHours;
+                        const displayNormal = previewCalc
+                          ? previewCalc.normalDecimalHours
+                          : p.normalDecimalHours;
+
+                        return (
+                          <tr
+                            key={r.id}
+                            className={
+                              isEditingThis
+                                ? 'bg-teal-50/50'
+                                : p.isSunday
+                                ? 'bg-amber-50/35 hover:bg-amber-50/60'
+                                : 'hover:bg-slate-50/80'
+                            }
+                          >
+                            <td className="px-4 py-2.5 font-mono text-slate-800 tabular-nums whitespace-nowrap">
+                              {r.date}
+                            </td>
+                            <td className="px-3 py-2.5 whitespace-nowrap">
+                              <span
+                                className={
+                                  p.isSunday ? 'font-semibold text-amber-700' : 'text-slate-600'
+                                }
+                              >
+                                {dayShort}
+                                {p.isSunday ? ' · OT' : ''}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5 font-mono tabular-nums whitespace-nowrap">
+                              {isEditingThis && editingRow ? (
+                                <input
+                                  type="time"
+                                  value={editingRow.inTime}
+                                  onChange={(e) =>
+                                    setEditingRow({ ...editingRow, inTime: e.target.value })
+                                  }
+                                  className="rounded border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs"
+                                />
+                              ) : (
+                                formatDisplayTime(r.inTime)
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 font-mono tabular-nums whitespace-nowrap">
+                              {isEditingThis && editingRow ? (
+                                <input
+                                  type="time"
+                                  value={editingRow.outTime ?? ''}
+                                  onChange={(e) =>
+                                    setEditingRow({
+                                      ...editingRow,
+                                      outTime: e.target.value || null,
+                                    })
+                                  }
+                                  className="rounded border border-slate-300 bg-white px-1.5 py-1 font-mono text-xs"
+                                />
+                              ) : r.outTime ? (
+                                formatDisplayTime(r.outTime)
+                              ) : (
+                                '—'
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono tabular-nums whitespace-nowrap">
+                              {isEditingThis && editingRow ? (
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={600}
+                                  value={awayMins}
+                                  onChange={(e) =>
+                                    setEditingRow({
+                                      ...editingRow,
+                                      pausedTotalSeconds:
+                                        Math.max(0, Math.round(Number(e.target.value) || 0)) * 60,
+                                    })
+                                  }
+                                  className="w-14 rounded border border-slate-300 bg-white px-1.5 py-1 text-right font-mono text-xs"
+                                />
+                              ) : (
+                                `${awayMins}m`
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono font-semibold text-slate-900 tabular-nums whitespace-nowrap">
+                              {displayNet !== null ? `${displayNet.toFixed(2)}h` : '—'}
+                            </td>
+                            <td className="px-3 py-2.5 text-center font-mono font-semibold tabular-nums whitespace-nowrap">
+                              {hasOut ? (
+                                <span
+                                  className={displayP === 1 ? 'text-teal-800' : 'text-slate-400'}
+                                >
+                                  {displayP}
+                                </span>
+                              ) : (
+                                '—'
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-slate-700 tabular-nums whitespace-nowrap">
+                              {hasOut ? `${displayOT.toFixed(2)}h` : '—'}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono tabular-nums whitespace-nowrap">
+                              {isEditingThis && editingRow ? (
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={24}
+                                  step={0.25}
+                                  value={Number(
+                                    ((editingRow.thikadaMinutes ?? 0) / 60).toFixed(2)
+                                  )}
+                                  onChange={(e) =>
+                                    setEditingRow({
+                                      ...editingRow,
+                                      thikadaMinutes: Math.max(
+                                        0,
+                                        Math.round((Number(e.target.value) || 0) * 60)
+                                      ),
+                                    })
+                                  }
+                                  className="w-16 rounded border border-slate-300 bg-white px-1.5 py-1 text-right font-mono text-xs"
+                                />
+                              ) : displayThikada > 0 ? (
+                                <span className="text-slate-700">
+                                  -{displayThikada.toFixed(2)}h
+                                </span>
+                              ) : (
+                                <span className="text-slate-400">0</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono font-semibold tabular-nums whitespace-nowrap">
+                              {hasOut && displayNormal > 0 ? (
+                                <span className="text-amber-700">{displayNormal.toFixed(2)}h</span>
+                              ) : (
+                                <span className="text-slate-400">0.00h</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 whitespace-nowrap">
+                              <StatusLabel status={previewCalc ? previewCalc.status : r.status} />
+                            </td>
+                            <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                              {isEditingThis ? (
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={handleSaveRowEdit}
+                                    disabled={savingRowEdit}
+                                    className="rounded bg-teal-700 p-1 text-white hover:bg-teal-800"
+                                    aria-label="Save row changes"
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingRow(null)}
+                                    className="rounded border border-slate-300 bg-white p-1 text-slate-600 hover:bg-slate-100"
+                                    aria-label="Cancel row edit"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingRow({ ...r })}
+                                  className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                                  aria-label={`Edit ${r.date}`}
+                                >
+                                  <Edit3 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-slate-200 bg-slate-50 font-mono text-xs font-semibold text-slate-900">
+                        <td className="px-4 py-3 whitespace-nowrap">TOTAL</td>
+                        <td className="px-3 py-3 whitespace-nowrap text-slate-700">
+                          {historyTotals.entries} Days
+                        </td>
+                        <td className="px-3 py-3" />
+                        <td className="px-3 py-3" />
+                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-600">
+                          {historyTotals.totalAwayMins}m
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-teal-800">
+                          {historyTotals.netDecimal.toFixed(2)}h
+                        </td>
+                        <td className="px-3 py-3 text-center tabular-nums whitespace-nowrap text-teal-900">
+                          {historyTotals.presentCount} P
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-700">
+                          {historyTotals.overtimeDecimal.toFixed(2)}h
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-700">
+                          -{historyTotals.totalThikadaDecimal.toFixed(2)}h
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-amber-800">
+                          {historyTotals.finalNetNormalDecimal.toFixed(2)}h
+                        </td>
+                        <td className="px-3 py-3" />
+                        <td className="px-4 py-3" />
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {/* Modal Footer Actions */}
+                <div className="border-t border-slate-200 bg-slate-50 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleExportMonthCSV(historyMonth, historyMonthRecords)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Export {formatMonthLabel(historyMonth)} CSV</span>
+                  </button>
+
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {selectedEmployee.individualSheetUrl && (
+                      <a
+                        href={selectedEmployee.individualSheetUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-teal-700 bg-white px-3.5 py-2 text-xs font-medium text-teal-800 hover:bg-teal-50 whitespace-nowrap"
+                      >
+                        <span>Open Google Sheet</span>
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => onRequestStandaloneSheet(selectedEmployee, historyMonth)}
+                      disabled={!isGoogleAuthed}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                      <span>
+                        Create / Update {formatMonthLabel(historyMonth)} in Google Sheet
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Previous Month Bulk Builder Modal */}
       {showMonthBuilder && (
@@ -714,15 +1314,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           aria-modal="true"
           aria-labelledby="month-builder-title"
         >
-          <div className="flex max-h-[92vh] w-full max-w-4xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
                 <h3 id="month-builder-title" className="text-base font-semibold text-slate-900">
                   Build Monthly Attendance — {selectedEmployee.name} ({selectedEmployee.empCode})
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  Select a month, review daily check-in/out timings, and save directly to employee
-                  history. Sunday working hours count 100% toward Overtime.
+                  8h+ Mon–Sat counts as 1 Present (P); &lt;8h, extra hours, and Sundays count in
+                  Normal Hours (H) minus Thikada hours.
                 </p>
               </div>
               <button
@@ -736,7 +1336,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
 
             <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-6 items-end">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-7 items-end">
                 <div className="col-span-2 sm:col-span-1">
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
                     Month
@@ -785,6 +1385,22 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
                   />
                 </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Thikada (hrs)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={24}
+                    step={0.25}
+                    value={defaultThikadaHours}
+                    onChange={(e) =>
+                      setDefaultThikadaHours(Math.max(0, Number(e.target.value) || 0))
+                    }
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                  />
+                </div>
                 <div className="flex items-center gap-2 pb-1.5">
                   <input
                     id="include-sundays-checkbox"
@@ -797,7 +1413,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     htmlFor="include-sundays-checkbox"
                     className="text-xs font-medium text-slate-700 select-none"
                   >
-                    Include Sundays
+                    Sundays
                   </label>
                 </div>
                 <div>
@@ -822,8 +1438,10 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     <th className="py-2 px-2 font-medium">In Time</th>
                     <th className="py-2 px-2 font-medium">Out Time</th>
                     <th className="py-2 px-2 font-medium">Away (m)</th>
+                    <th className="py-2 px-2 font-medium">Thikada (h)</th>
                     <th className="py-2 px-2 font-medium text-right">Working</th>
-                    <th className="py-2 pl-2 font-medium text-right">Overtime</th>
+                    <th className="py-2 px-2 font-medium text-center">P</th>
+                    <th className="py-2 pl-2 font-medium text-right">Normal (H)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -835,7 +1453,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             row.outTime,
                             selectedEmployee.breakMinutes || 30,
                             row.date,
-                            row.awayMinutes
+                            row.awayMinutes,
+                            Math.round(Math.max(0, row.thikadaHours) * 60)
                           )
                         : null;
 
@@ -850,13 +1469,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         <td className="py-2 px-2 whitespace-nowrap">
                           <span
                             className={
-                              row.isSunday
-                                ? 'font-semibold text-amber-700'
-                                : 'text-slate-600'
+                              row.isSunday ? 'font-semibold text-amber-700' : 'text-slate-600'
                             }
                           >
                             {row.dayShort}
-                            {row.isSunday ? ' (100% OT)' : ''}
+                            {row.isSunday ? ' (OT -> H)' : ''}
                           </span>
                         </td>
                         <td className="py-2 px-2 text-center">
@@ -917,13 +1534,43 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             className="w-16 rounded border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
                           />
                         </td>
+                        <td className="py-2 px-2">
+                          <input
+                            type="number"
+                            min={0}
+                            max={24}
+                            step={0.25}
+                            value={row.thikadaHours}
+                            disabled={!row.present}
+                            onChange={(e) => {
+                              const val = Math.max(0, Number(e.target.value) || 0);
+                              setBuilderRows((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, thikadaHours: val } : r))
+                              );
+                            }}
+                            className="w-16 rounded border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
+                          />
+                        </td>
                         <td className="py-2 px-2 text-right font-mono font-medium text-slate-900 tabular-nums whitespace-nowrap">
                           {calc ? `${calc.netDecimalHours.toFixed(2)}h` : 'Off'}
                         </td>
+                        <td className="py-2 px-2 text-center font-mono font-semibold tabular-nums whitespace-nowrap">
+                          {calc ? (
+                            <span
+                              className={
+                                calc.presentCount === 1 ? 'text-teal-800' : 'text-slate-400'
+                              }
+                            >
+                              {calc.presentCount}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
                         <td className="py-2 pl-2 text-right font-mono font-semibold tabular-nums whitespace-nowrap">
-                          {calc && calc.overtimeMinutes > 0 ? (
+                          {calc && calc.normalMinutes > 0 ? (
                             <span className="text-amber-700">
-                              +{calc.overtimeDecimalHours.toFixed(2)}h
+                              {calc.normalDecimalHours.toFixed(2)}h
                             </span>
                           ) : (
                             <span className="text-slate-400">0.00h</span>
@@ -939,21 +1586,27 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             <div className="border-t border-slate-200 bg-slate-50 px-6 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-wrap items-center gap-4 text-xs">
                 <div>
-                  <span className="text-slate-500">Present Days: </span>
-                  <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                    {builderTotals.presentDays}
+                  <span className="text-slate-500">Present (P): </span>
+                  <span className="font-mono font-semibold text-teal-800 tabular-nums">
+                    {builderTotals.presentCount}
                   </span>
                 </div>
                 <div>
                   <span className="text-slate-500">Working: </span>
-                  <span className="font-mono font-semibold text-teal-800 tabular-nums">
+                  <span className="font-mono font-semibold text-slate-900 tabular-nums">
                     {(builderTotals.netMinutes / 60).toFixed(2)}h
                   </span>
                 </div>
                 <div>
-                  <span className="text-slate-500">Overtime: </span>
+                  <span className="text-slate-500">Thikada: </span>
+                  <span className="font-mono font-semibold text-slate-700 tabular-nums">
+                    -{(builderTotals.thikadaMinutes / 60).toFixed(2)}h
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Normal (H): </span>
                   <span className="font-mono font-semibold text-amber-700 tabular-nums">
-                    {(builderTotals.overtimeMinutes / 60).toFixed(2)}h
+                    {(builderTotals.normalMinutes / 60).toFixed(2)}h
                   </span>
                 </div>
               </div>
@@ -969,7 +1622,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   />
                   <span>
                     {isGoogleAuthed
-                      ? 'Also update Google Sheet'
+                      ? 'Also create/update Google Sheet'
                       : 'Connect Google Sheets to sync'}
                   </span>
                 </label>
@@ -984,12 +1637,12 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 <button
                   type="button"
                   onClick={handleSaveBuilderMonth}
-                  disabled={isSavingMonth || builderTotals.presentDays === 0}
+                  disabled={isSavingMonth || builderTotals.selectedDays === 0}
                   className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
                 >
                   {isSavingMonth
                     ? 'Saving...'
-                    : `Save ${builderTotals.presentDays} Day(s) to History`}
+                    : `Save ${builderTotals.selectedDays} Day(s) to History`}
                 </button>
               </div>
             </div>

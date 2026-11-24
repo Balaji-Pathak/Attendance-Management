@@ -8,7 +8,7 @@ import {
   formatDisplayTime,
   formatDurationHM,
   getDayNameShort,
-  isSundayISO,
+  getRecordPayroll,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -56,34 +56,31 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   }, [records, dateFilter, empFilter, statusFilter, search]);
 
   const totals = useMemo(() => {
-    let totalBreak = 0;
+    let totalPresent = 0;
     let totalNet = 0;
-    let totalOvertime = 0;
+    let totalNormal = 0;
+    let totalThikada = 0;
     let pendingSync = 0;
 
     for (const r of filteredRecords) {
       if (!r.syncedToSheet) pendingSync += 1;
       if (r.outTime && r.netMinutes !== null) {
-        totalBreak += r.breakMinutes;
         totalNet += r.netMinutes;
-        const isSun = r.isSunday ?? isSundayISO(r.date);
-        const ot =
-          typeof r.overtimeMinutes === 'number'
-            ? r.overtimeMinutes
-            : isSun
-            ? r.netMinutes
-            : Math.max(0, r.netMinutes - 480);
-        totalOvertime += ot;
+        const p = getRecordPayroll(r);
+        totalPresent += p.presentCount;
+        totalNormal += p.normalMinutes;
+        totalThikada += p.thikadaMinutes;
       }
     }
 
     return {
       entries: filteredRecords.length,
-      totalBreak,
+      totalPresent,
       totalNet,
       totalNetDecimal: Number((totalNet / 60).toFixed(2)),
-      totalOvertime,
-      totalOvertimeDecimal: Number((totalOvertime / 60).toFixed(2)),
+      totalNormal,
+      totalNormalDecimal: Number((totalNormal / 60).toFixed(2)),
+      totalThikadaDecimal: Number((totalThikada / 60).toFixed(2)),
       pendingSync,
     };
   }, [filteredRecords]);
@@ -100,16 +97,14 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         'Out Time',
         'Away (mins)',
         'Working Hours',
-        'Overtime Hours',
+        'Present (P)',
+        'Overtime (hrs)',
+        'Thikada (hrs)',
+        'Normal Hours (H)',
       ],
       filteredRecords.map((r) => {
-        const isSun = r.isSunday ?? isSundayISO(r.date);
-        const otDec =
-          typeof r.overtimeDecimalHours === 'number'
-            ? r.overtimeDecimalHours
-            : r.netMinutes !== null
-            ? Number(((isSun ? r.netMinutes : Math.max(0, r.netMinutes - 480)) / 60).toFixed(2))
-            : '';
+        const p = getRecordPayroll(r);
+        const hasOut = Boolean(r.outTime && r.netMinutes !== null);
         return [
           r.date,
           getDayNameShort(r.date),
@@ -119,7 +114,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           r.outTime ? formatDisplayTime(r.outTime) : '',
           Math.round((r.pausedTotalSeconds ?? 0) / 60),
           r.netDecimalHours !== null ? r.netDecimalHours : '',
-          otDec,
+          hasOut ? p.presentCount : '',
+          hasOut ? p.overtimeDecimalHours : '',
+          p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
+          hasOut ? p.normalDecimalHours : '',
         ];
       })
     );
@@ -144,7 +142,8 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       editing.outTime,
       editing.breakMinutes,
       editing.date,
-      Math.round((editing.pausedTotalSeconds ?? 0) / 60)
+      Math.round((editing.pausedTotalSeconds ?? 0) / 60),
+      editing.thikadaMinutes ?? 0
     );
   }, [editing]);
 
@@ -153,9 +152,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       {/* Summary Strip */}
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Entries Shown</div>
+          <div className="text-xs font-medium text-slate-500">Present Days (P)</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
-            {totals.entries}
+            {totals.totalPresent}
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
@@ -165,9 +164,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Total Overtime Hours</div>
+          <div className="text-xs font-medium text-slate-500">Normal Hours (H)</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
-            {totals.totalOvertimeDecimal.toFixed(2)}h
+            {totals.totalNormalDecimal.toFixed(2)}h
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
@@ -281,29 +280,18 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Working (-30m)</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Overtime</th>
+                  <th className="px-4 py-3 text-center whitespace-nowrap">P</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Thikada</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Normal (H)</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-right whitespace-nowrap">Admin</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredRecords.map((rec) => {
-                  const isSun = rec.isSunday ?? isSundayISO(rec.date);
+                  const p = getRecordPayroll(rec);
                   const awayMins = Math.round((rec.pausedTotalSeconds ?? 0) / 60);
-                  const otMins =
-                    rec.netMinutes !== null
-                      ? typeof rec.overtimeMinutes === 'number'
-                        ? rec.overtimeMinutes
-                        : isSun
-                        ? rec.netMinutes
-                        : Math.max(0, rec.netMinutes - 480)
-                      : null;
-                  const otDec =
-                    otMins !== null
-                      ? typeof rec.overtimeDecimalHours === 'number'
-                        ? rec.overtimeDecimalHours
-                        : Number((otMins / 60).toFixed(2))
-                      : null;
+                  const hasOut = Boolean(rec.outTime && rec.netMinutes !== null);
 
                   return (
                     <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
@@ -311,7 +299,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                         <span>{rec.date}</span>
                         <span
                           className={`ml-2 font-sans font-medium ${
-                            isSun ? 'text-amber-700' : 'text-slate-400'
+                            p.isSunday ? 'text-amber-700' : 'text-slate-400'
                           }`}
                         >
                           {getDayNameShort(rec.date)}
@@ -337,13 +325,25 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                           ? `${formatDurationHM(rec.netMinutes)} · ${rec.netDecimalHours?.toFixed(2)}h`
                           : '—'}
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
-                        {otMins !== null && otMins > 0 ? (
-                          <span className="text-amber-700">
-                            {formatDurationHM(otMins)} · {otDec?.toFixed(2)}h
+                      <td className="px-4 py-3.5 text-center font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
+                        {hasOut ? (
+                          <span className={p.presentCount === 1 ? 'text-teal-800' : 'text-slate-400'}>
+                            {p.presentCount === 1 ? 'P (1)' : '0'}
                           </span>
                         ) : (
-                          <span className="text-slate-400">—</span>
+                          '—'
+                        )}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
+                        {p.thikadaDecimalHours > 0 ? `-${p.thikadaDecimalHours.toFixed(2)}h` : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
+                        {hasOut && p.normalMinutes > 0 ? (
+                          <span className="text-amber-700">
+                            {p.normalDecimalHours.toFixed(2)}h
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">0.00h</span>
                         )}
                       </td>
                       <td className="px-4 py-3.5 whitespace-nowrap">
@@ -445,7 +445,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700">In Time</label>
                   <input
@@ -458,7 +458,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700">
-                    Out Time (blank = On Duty)
+                    Out Time
                   </label>
                   <input
                     type="time"
@@ -469,24 +469,53 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                     className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700">
+                    Thikada (hrs)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={24}
+                    step={0.25}
+                    value={Number(((editing.thikadaMinutes ?? 0) / 60).toFixed(2))}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        thikadaMinutes: Math.max(
+                          0,
+                          Math.round((Number(e.target.value) || 0) * 60)
+                        ),
+                      })
+                    }
+                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
+                  />
+                </div>
               </div>
 
               {editPreview && (
                 <div className="rounded-lg border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-700">
-                      Lunch -{editPreview.breakDeductedMinutes}m applied
+                      Working ({editPreview.breakDeductedMinutes}m break deducted)
                     </span>
                     <span className="font-mono font-semibold text-teal-900 tabular-nums">
-                      Working: {editPreview.netDecimalHours.toFixed(2)}h
+                      {editPreview.netDecimalHours.toFixed(2)}h · P = {editPreview.presentCount}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-700">
-                      {editPreview.isSunday ? 'Sunday Rule (100% OT)' : 'Overtime (>8h)'}
+                      {editPreview.isSunday
+                        ? 'Sunday (100% OT -> H)'
+                        : editPreview.netMinutes < 480
+                        ? '<8h Shift -> Normal Hours (H)'
+                        : 'Overtime (>8h) -> Normal Hours (H)'}
+                      {editPreview.thikadaMinutes > 0
+                        ? ` (-${editPreview.thikadaDecimalHours.toFixed(2)}h Thikada)`
+                        : ''}
                     </span>
                     <span className="font-mono font-semibold text-amber-800 tabular-nums">
-                      OT: {editPreview.overtimeDecimalHours.toFixed(2)}h
+                      H: {editPreview.normalDecimalHours.toFixed(2)}h
                     </span>
                   </div>
                 </div>

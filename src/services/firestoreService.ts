@@ -34,6 +34,19 @@ const SETTINGS_COL = 'settings';
 const ADMIN_EMAILS_COL = 'admin_emails';
 const WORKSPACE_DOC_ID = 'workspace';
 
+function sanitizeMonthlyThikada(
+  raw?: Record<string, number>
+): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const clean: Record<string, number> = {};
+  for (const [key, val] of Object.entries(raw)) {
+    if (/^\d{4}-\d{2}$/.test(key) && typeof val === 'number' && !Number.isNaN(val) && val > 0) {
+      clean[key] = Math.min(44640, Math.round(val));
+    }
+  }
+  return Object.keys(clean).length > 0 ? clean : undefined;
+}
+
 function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     id: emp.id.trim().slice(0, 80),
@@ -49,6 +62,10 @@ function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
   }
   if (emp.individualSheetUrl && emp.individualSheetUrl.trim()) {
     payload.individualSheetUrl = emp.individualSheetUrl.trim().slice(0, 300);
+  }
+  const cleanThikada = sanitizeMonthlyThikada(emp.monthlyThikadaMinutes);
+  if (cleanThikada) {
+    payload.monthlyThikadaMinutes = cleanThikada;
   }
   return payload;
 }
@@ -82,6 +99,41 @@ function docToAttendanceRecord(id: string, data: Record<string, unknown>): Atten
       ? Number((overtimeMinutes / 60).toFixed(2))
       : null;
 
+  const thikadaMinutes =
+    typeof data.thikadaMinutes === 'number' ? Math.max(0, Math.round(data.thikadaMinutes)) : 0;
+
+  const presentCount =
+    typeof data.presentCount === 'number'
+      ? data.presentCount
+      : netMinutes !== null
+      ? !isSunday && netMinutes >= 480
+        ? 1
+        : 0
+      : null;
+
+  const grossNormalMins =
+    netMinutes !== null
+      ? isSunday
+        ? netMinutes
+        : netMinutes >= 480
+        ? netMinutes - 480
+        : netMinutes
+      : null;
+
+  const normalMinutes =
+    typeof data.normalMinutes === 'number'
+      ? data.normalMinutes
+      : grossNormalMins !== null
+      ? Math.max(0, grossNormalMins - thikadaMinutes)
+      : null;
+
+  const normalDecimalHours =
+    typeof data.normalDecimalHours === 'number'
+      ? data.normalDecimalHours
+      : normalMinutes !== null
+      ? Number((normalMinutes / 60).toFixed(2))
+      : null;
+
   return {
     id,
     date,
@@ -101,6 +153,10 @@ function docToAttendanceRecord(id: string, data: Record<string, unknown>): Atten
     netDecimalHours: typeof data.netDecimalHours === 'number' ? data.netDecimalHours : null,
     overtimeMinutes,
     overtimeDecimalHours,
+    presentCount,
+    thikadaMinutes,
+    normalMinutes,
+    normalDecimalHours,
     isSunday,
     status: (data.status as AttendanceRecord['status']) || 'on_duty',
     syncedToSheet: Boolean(data.syncedToSheet),
@@ -192,6 +248,10 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
     netDecimalHours: null,
     overtimeMinutes: null,
     overtimeDecimalHours: null,
+    presentCount: null,
+    thikadaMinutes: 0,
+    normalMinutes: null,
+    normalDecimalHours: null,
     isSunday,
     status: 'on_duty' as const,
     syncedToSheet: false,
@@ -219,6 +279,10 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
       netDecimalHours: null,
       overtimeMinutes: null,
       overtimeDecimalHours: null,
+      presentCount: null,
+      thikadaMinutes: 0,
+      normalMinutes: null,
+      normalDecimalHours: null,
       isSunday,
       status: 'on_duty',
       syncedToSheet: false,
@@ -308,19 +372,23 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
     Math.max(0, Math.round(record.pausedTotalSeconds ?? 0)) + extraPauseSec
   );
 
+  const thikadaMins = Math.max(0, Math.round(record.thikadaMinutes ?? 0));
   const calc =
     typeof record.startedAtMs === 'number' && record.startedAtMs > 0
       ? calculateMetricsFromWorkedMinutes(
           Math.max(0, Math.round((Math.floor((nowMs - record.startedAtMs) / 1000) - finalPausedSeconds) / 60)),
           record.breakMinutes ?? 30,
-          record.date
+          record.date,
+          false,
+          thikadaMins
         )
       : calculateShiftMetrics(
           record.inTime,
           outTime,
           record.breakMinutes ?? 30,
           record.date,
-          Math.round(finalPausedSeconds / 60)
+          Math.round(finalPausedSeconds / 60),
+          thikadaMins
         );
 
   try {
@@ -334,6 +402,10 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
       netDecimalHours: calc.netDecimalHours,
       overtimeMinutes: calc.overtimeMinutes,
       overtimeDecimalHours: calc.overtimeDecimalHours,
+      presentCount: calc.presentCount,
+      thikadaMinutes: calc.thikadaMinutes,
+      normalMinutes: calc.normalMinutes,
+      normalDecimalHours: calc.normalDecimalHours,
       isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
@@ -351,6 +423,10 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
       netDecimalHours: calc.netDecimalHours,
       overtimeMinutes: calc.overtimeMinutes,
       overtimeDecimalHours: calc.overtimeDecimalHours,
+      presentCount: calc.presentCount,
+      thikadaMinutes: calc.thikadaMinutes,
+      normalMinutes: calc.normalMinutes,
+      normalDecimalHours: calc.normalDecimalHours,
       isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
@@ -374,6 +450,15 @@ export function subscribeAllEmployees(
       const list: Employee[] = snapshot.docs
         .map((d) => {
           const data = d.data();
+          const rawMonthly = data.monthlyThikadaMinutes as Record<string, unknown> | undefined;
+          const monthlyThikadaMinutes =
+            rawMonthly && typeof rawMonthly === 'object'
+              ? Object.fromEntries(
+                  Object.entries(rawMonthly).filter(
+                    ([k, v]) => /^\d{4}-\d{2}$/.test(k) && typeof v === 'number'
+                  )
+                ) as Record<string, number>
+              : undefined;
           return {
             id: String(data.id ?? d.id),
             empCode: String(data.empCode ?? ''),
@@ -387,6 +472,7 @@ export function subscribeAllEmployees(
             individualSheetUrl: data.individualSheetUrl
               ? String(data.individualSheetUrl)
               : undefined,
+            monthlyThikadaMinutes,
           };
         })
         .sort((a, b) => a.empCode.localeCompare(b.empCode));
@@ -482,6 +568,7 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
   const path = `${ATTENDANCE_COL}/${record.id}`;
   const isSunday = isSundayISO(record.date);
   const pausedSeconds = Math.max(0, Math.round(record.pausedTotalSeconds ?? 0));
+  const thikadaMins = Math.max(0, Math.round(record.thikadaMinutes ?? 0));
   let updateFields: Record<string, unknown>;
 
   if (record.outTime) {
@@ -490,7 +577,8 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
       record.outTime,
       record.breakMinutes,
       record.date,
-      Math.round(pausedSeconds / 60)
+      Math.round(pausedSeconds / 60),
+      thikadaMins
     );
     updateFields = {
       date: record.date,
@@ -505,6 +593,10 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
       netDecimalHours: calc.netDecimalHours,
       overtimeMinutes: calc.overtimeMinutes,
       overtimeDecimalHours: calc.overtimeDecimalHours,
+      presentCount: calc.presentCount,
+      thikadaMinutes: calc.thikadaMinutes,
+      normalMinutes: calc.normalMinutes,
+      normalDecimalHours: calc.normalDecimalHours,
       isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
@@ -524,6 +616,10 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
       netDecimalHours: null,
       overtimeMinutes: null,
       overtimeDecimalHours: null,
+      presentCount: null,
+      thikadaMinutes: thikadaMins,
+      normalMinutes: null,
+      normalDecimalHours: null,
       isSunday,
       status: 'on_duty',
       syncedToSheet: false,
@@ -550,6 +646,7 @@ export async function adminSaveBulkAttendance(
       const docId = `${r.date}_${r.empId}`.replace(/[^a-zA-Z0-9_-]/g, '');
       const isSunday = r.isSunday ?? isSundayISO(r.date);
       const pausedSeconds = Math.max(0, Math.round(r.pausedTotalSeconds ?? 0));
+      const thikadaMins = Math.max(0, Math.round(r.thikadaMinutes ?? 0));
 
       batch.set(doc(db, ATTENDANCE_COL, docId), {
         id: docId,
@@ -569,6 +666,10 @@ export async function adminSaveBulkAttendance(
         netDecimalHours: r.netDecimalHours,
         overtimeMinutes: r.overtimeMinutes ?? null,
         overtimeDecimalHours: r.overtimeDecimalHours ?? null,
+        presentCount: r.presentCount ?? null,
+        thikadaMinutes: thikadaMins,
+        normalMinutes: r.normalMinutes ?? null,
+        normalDecimalHours: r.normalDecimalHours ?? null,
         isSunday,
         status: r.status,
         syncedToSheet,
@@ -676,6 +777,10 @@ export async function adminImportFromSheet(
           netDecimalHours: r.netDecimalHours,
           overtimeMinutes: r.overtimeMinutes ?? null,
           overtimeDecimalHours: r.overtimeDecimalHours ?? null,
+          presentCount: r.presentCount ?? null,
+          thikadaMinutes: Math.max(0, Math.round(r.thikadaMinutes ?? 0)),
+          normalMinutes: r.normalMinutes ?? null,
+          normalDecimalHours: r.normalDecimalHours ?? null,
           isSunday,
           status: r.status,
           syncedToSheet: true,

@@ -39,6 +39,9 @@
         "individualSheetUrl": {
           "type": "string",
           "maxLength": 300
+        },
+        "monthlyThikadaMinutes": {
+          "type": "object"
         }
       },
       "required": ["id", "empCode", "name", "department", "breakMinutes", "active"]
@@ -116,6 +119,18 @@
           "type": "integer"
         },
         "overtimeDecimalHours": {
+          "type": "number"
+        },
+        "presentCount": {
+          "type": "integer"
+        },
+        "thikadaMinutes": {
+          "type": "integer"
+        },
+        "normalMinutes": {
+          "type": "integer"
+        },
+        "normalDecimalHours": {
           "type": "number"
         },
         "isSunday": {

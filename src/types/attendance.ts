@@ -16,6 +16,7 @@ export interface Employee {
   active: boolean;
   individualSheetId?: string;
   individualSheetUrl?: string;
+  monthlyThikadaMinutes?: Record<string, number>; // Keyed by YYYY-MM
 }
 
 export interface AttendanceRecord {
@@ -36,6 +37,10 @@ export interface AttendanceRecord {
   netDecimalHours: number | null;
   overtimeMinutes?: number | null;
   overtimeDecimalHours?: number | null;
+  presentCount?: number | null; // 1 for >=8h Mon-Sat, 0 otherwise
+  thikadaMinutes?: number; // Piece-rate / contractor hours deducted from Normal Hours (H)
+  normalMinutes?: number | null; // H = (<8h OR >8h OT OR Sunday 100% OT) - thikadaMinutes
+  normalDecimalHours?: number | null;
   isSunday?: boolean;
   status: AttendanceStatus;
   syncedToSheet: boolean;

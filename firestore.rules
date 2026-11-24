@@ -49,7 +49,8 @@ service cloud.firestore {
           'breakMinutes',
           'active',
           'individualSheetId',
-          'individualSheetUrl'
+          'individualSheetUrl',
+          'monthlyThikadaMinutes'
         ])
         && isValidId(data.id)
         && data.empCode is string && data.empCode.size() >= 1 && data.empCode.size() <= 30
@@ -58,7 +59,8 @@ service cloud.firestore {
         && data.breakMinutes is int && data.breakMinutes >= 0 && data.breakMinutes <= 180
         && data.active is bool
         && (!('individualSheetId' in data) || (data.individualSheetId is string && data.individualSheetId.size() <= 128))
-        && (!('individualSheetUrl' in data) || (data.individualSheetUrl is string && data.individualSheetUrl.size() <= 300));
+        && (!('individualSheetUrl' in data) || (data.individualSheetUrl is string && data.individualSheetUrl.size() <= 300))
+        && (!('monthlyThikadaMinutes' in data) || (data.monthlyThikadaMinutes is map && data.monthlyThikadaMinutes.size() <= 120));
     }
 
     function isValidAttendance(data) {
@@ -102,6 +104,10 @@ service cloud.firestore {
           'netDecimalHours',
           'overtimeMinutes',
           'overtimeDecimalHours',
+          'presentCount',
+          'thikadaMinutes',
+          'normalMinutes',
+          'normalDecimalHours',
           'isSunday',
           'status',
           'syncedToSheet',
@@ -125,6 +131,10 @@ service cloud.firestore {
         && (data.netDecimalHours == null || (data.netDecimalHours is number && data.netDecimalHours >= 0 && data.netDecimalHours <= 24))
         && (data.overtimeMinutes == null || (data.overtimeMinutes is int && data.overtimeMinutes >= 0 && data.overtimeMinutes <= 1440))
         && (data.overtimeDecimalHours == null || (data.overtimeDecimalHours is number && data.overtimeDecimalHours >= 0 && data.overtimeDecimalHours <= 24))
+        && (!('presentCount' in data) || data.presentCount == null || (data.presentCount is int && data.presentCount >= 0 && data.presentCount <= 1))
+        && (!('thikadaMinutes' in data) || (data.thikadaMinutes is int && data.thikadaMinutes >= 0 && data.thikadaMinutes <= 1440))
+        && (!('normalMinutes' in data) || data.normalMinutes == null || (data.normalMinutes is int && data.normalMinutes >= 0 && data.normalMinutes <= 1440))
+        && (!('normalDecimalHours' in data) || data.normalDecimalHours == null || (data.normalDecimalHours is number && data.normalDecimalHours >= 0 && data.normalDecimalHours <= 24))
         && data.isSunday is bool
         && data.status in ['on_duty', 'completed', 'short_shift']
         && data.syncedToSheet is bool
@@ -283,6 +293,10 @@ service cloud.firestore {
                   'netDecimalHours',
                   'overtimeMinutes',
                   'overtimeDecimalHours',
+                  'presentCount',
+                  'thikadaMinutes',
+                  'normalMinutes',
+                  'normalDecimalHours',
                   'isSunday',
                   'status',
                   'syncedToSheet',

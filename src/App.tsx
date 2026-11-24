@@ -26,6 +26,8 @@ import {
 } from './types/attendance';
 import {
   buildStarterEmployees,
+  calculateShiftMetrics,
+  formatMonthLabel,
   getEmployeeSheetTabName,
   getTodayISO,
   sortRecordsNewestFirst,
@@ -780,7 +782,7 @@ export default function App() {
     });
   };
 
-  const handleRequestStandaloneSheet = (employee: Employee) => {
+  const handleRequestStandaloneSheet = (employee: Employee, monthFilter?: string) => {
     const token = getAccessToken();
     if (!token) {
       setActiveNav('sheets-sync');
@@ -791,20 +793,30 @@ export default function App() {
       return;
     }
     const isUpdate = Boolean(employee.individualSheetId);
+    const monthLabel = monthFilter ? formatMonthLabel(monthFilter) : null;
 
     setConfirmRequest({
-      title: isUpdate
+      title: monthLabel
+        ? `${isUpdate ? 'Update' : 'Create'} ${monthLabel} Tab in ${employee.name}'s Google Sheet?`
+        : isUpdate
         ? `Update ${employee.name}'s Individual Google Sheet?`
         : `Create Individual Google Sheet for ${employee.name}?`,
-      description: isUpdate
+      description: monthLabel
+        ? `Creates or updates the "${monthLabel}" monthly table (Present P, Normal Hours H, Thikada deductions) and refreshes the main Attendance tab.`
+        : isUpdate
         ? `Update the standalone Google Sheet for ${employee.name} with their attendance records.`
         : `Create a dedicated standalone Google Sheet file in Google Drive for ${employee.name} (${employee.empCode}).`,
-      affectedTarget: `${employee.empCode} - ${employee.name} Attendance`,
+      affectedTarget: `${employee.empCode} - ${employee.name} Attendance${monthLabel ? ` · ${monthLabel}` : ''}`,
       confirmLabel: isUpdate ? 'Update Sheet' : 'Create Sheet',
       onConfirm: async () => {
         setIsSyncing(true);
         try {
-          const res = await createOrUpdateStandaloneEmployeeSheet(token, employee, records);
+          const res = await createOrUpdateStandaloneEmployeeSheet(
+            token,
+            employee,
+            records,
+            monthFilter
+          );
           const updatedEmp: Employee = {
             ...employee,
             individualSheetId: res.spreadsheetId,
@@ -826,7 +838,9 @@ export default function App() {
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
-            message: `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name} and shared with all company admins.`,
+            message: monthLabel
+              ? `Updated "${monthLabel}" in ${employee.name}'s Google Sheet and shared with all company admins.`
+              : `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name} and shared with all company admins.`,
           });
         } catch (err) {
           handleGoogleError(err, 'Could not create or update individual Google Sheet.');
@@ -892,13 +906,11 @@ export default function App() {
         await syncOneEmployeeAndMaster(updatedEmp, nextEmps, nextRecords);
       }
 
-      const totalOt = imported.records.reduce(
-        (acc, r) => acc + (r.overtimeDecimalHours ?? 0),
-        0
-      );
+      const totalP = imported.records.reduce((acc, r) => acc + (r.presentCount ?? 0), 0);
+      const totalH = imported.records.reduce((acc, r) => acc + (r.normalDecimalHours ?? 0), 0);
       setNotice({
         type: 'success',
-        message: `Imported ${imported.records.length} day(s) (${totalOt.toFixed(2)}h overtime) from "${imported.spreadsheetTitle}" for ${employee.name}.`,
+        message: `Imported ${imported.records.length} day(s) (${totalP} P, ${totalH.toFixed(2)}h Normal H) from "${imported.spreadsheetTitle}" for ${employee.name}.`,
       });
     } catch (err) {
       handleGoogleError(err, 'Failed to import employee Google Sheet.');
@@ -910,7 +922,8 @@ export default function App() {
   const handleSaveEmployeeMonthRecords = async (
     employee: Employee,
     monthRecords: AttendanceRecord[],
-    syncToStandaloneSheet: boolean
+    syncToStandaloneSheet: boolean,
+    monthFilter?: string
   ) => {
     setIsSyncing(true);
     try {
@@ -922,7 +935,12 @@ export default function App() {
       let updatedEmp = employee;
 
       if (syncToStandaloneSheet && token) {
-        const res = await createOrUpdateStandaloneEmployeeSheet(token, employee, nextRecords);
+        const res = await createOrUpdateStandaloneEmployeeSheet(
+          token,
+          employee,
+          nextRecords,
+          monthFilter
+        );
         updatedEmp = {
           ...employee,
           individualSheetId: res.spreadsheetId,
@@ -940,19 +958,92 @@ export default function App() {
         await syncOneEmployeeAndMaster(updatedEmp, nextEmps, nextRecords);
       }
 
-      const totalOt = monthRecords.reduce(
-        (acc, r) => acc + (r.overtimeDecimalHours ?? 0),
-        0
-      );
+      const totalP = monthRecords.reduce((acc, r) => acc + (r.presentCount ?? 0), 0);
+      const totalH = monthRecords.reduce((acc, r) => acc + (r.normalDecimalHours ?? 0), 0);
       setNotice({
         type: 'success',
-        message: `Saved ${monthRecords.length} day(s) (${totalOt.toFixed(2)}h overtime) to ${employee.name}'s history${syncToStandaloneSheet && token ? ' and updated Google Sheets' : ''}.`,
+        message: `Saved ${monthRecords.length} day(s) (${totalP} P, ${totalH.toFixed(2)}h Normal H) to ${employee.name}'s history${syncToStandaloneSheet && token ? ' and updated Google Sheets' : ''}.`,
       });
     } catch (err) {
       handleGoogleError(err, 'Could not save monthly attendance records.');
     } finally {
       setIsSyncing(false);
     }
+  };
+
+  const handleUpdateSingleRecord = async (updated: AttendanceRecord) => {
+    await adminUpdateAttendance(updated);
+    const pausedMins = Math.round((updated.pausedTotalSeconds ?? 0) / 60);
+    const thikadaMins = Math.max(0, Math.round(updated.thikadaMinutes ?? 0));
+    const recalculated: AttendanceRecord = updated.outTime
+      ? (() => {
+          const calc = calculateShiftMetrics(
+            updated.inTime,
+            updated.outTime,
+            updated.breakMinutes,
+            updated.date,
+            pausedMins,
+            thikadaMins
+          );
+          return {
+            ...updated,
+            grossMinutes: calc.grossMinutes,
+            breakMinutes: calc.breakDeductedMinutes,
+            netMinutes: calc.netMinutes,
+            netDecimalHours: calc.netDecimalHours,
+            overtimeMinutes: calc.overtimeMinutes,
+            overtimeDecimalHours: calc.overtimeDecimalHours,
+            presentCount: calc.presentCount,
+            thikadaMinutes: calc.thikadaMinutes,
+            normalMinutes: calc.normalMinutes,
+            normalDecimalHours: calc.normalDecimalHours,
+            isSunday: calc.isSunday,
+            status: calc.status,
+            syncedToSheet: false,
+            updatedAt: new Date().toISOString(),
+          };
+        })()
+      : {
+          ...updated,
+          thikadaMinutes: thikadaMins,
+          syncedToSheet: false,
+          updatedAt: new Date().toISOString(),
+        };
+
+    setRecords((prev) =>
+      sortRecordsNewestFirst(prev.map((r) => (r.id === recalculated.id ? recalculated : r)))
+    );
+    setNotice({
+      type: 'success',
+      message: `Updated ${updated.empName} (${updated.date}).`,
+    });
+  };
+
+  const handleSaveMonthlyThikada = async (
+    employee: Employee,
+    yearMonth: string,
+    thikadaMinutes: number
+  ) => {
+    const nextMap: Record<string, number> = {
+      ...(employee.monthlyThikadaMinutes ?? {}),
+    };
+    if (thikadaMinutes > 0) {
+      nextMap[yearMonth] = thikadaMinutes;
+    } else {
+      delete nextMap[yearMonth];
+    }
+
+    const updatedEmp: Employee = {
+      ...employee,
+      monthlyThikadaMinutes: Object.keys(nextMap).length > 0 ? nextMap : undefined,
+    };
+
+    await adminSaveEmployee(updatedEmp);
+    upsertLocalEmployee(updatedEmp);
+    setNotice({
+      type: 'success',
+      message: `Applied ${(thikadaMinutes / 60).toFixed(2)}h Thikada deduction for ${formatMonthLabel(yearMonth)}.`,
+    });
   };
 
   const handlePullFromSheet = () => {
@@ -1316,6 +1407,8 @@ export default function App() {
               onRequestStandaloneSheet={handleRequestStandaloneSheet}
               onImportEmployeeSheet={handleImportEmployeeSheet}
               onSaveEmployeeMonthRecords={handleSaveEmployeeMonthRecords}
+              onUpdateSingleRecord={handleUpdateSingleRecord}
+              onSaveMonthlyThikada={handleSaveMonthlyThikada}
             />
           )}
 

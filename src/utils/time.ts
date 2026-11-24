@@ -133,8 +133,14 @@ export interface ShiftCalculationResult {
   breakDeductedMinutes: number;
   netMinutes: number;
   netDecimalHours: number;
+  presentCount: number;
   overtimeMinutes: number;
   overtimeDecimalHours: number;
+  thikadaMinutes: number;
+  thikadaDecimalHours: number;
+  grossNormalMinutes: number;
+  normalMinutes: number;
+  normalDecimalHours: number;
   isSunday: boolean;
   isOvernight: boolean;
   status: AttendanceStatus;
@@ -144,7 +150,8 @@ export function calculateMetricsFromWorkedMinutes(
   grossActiveMinutes: number,
   breakMinutes: number,
   dateIso?: string,
-  isOvernight = false
+  isOvernight = false,
+  thikadaMinutes = 0
 ): ShiftCalculationResult {
   const grossMinutes = Math.max(0, Math.round(grossActiveMinutes));
   const safeBreak = Math.max(0, breakMinutes);
@@ -152,19 +159,52 @@ export function calculateMetricsFromWorkedMinutes(
   const netMinutes = Math.max(0, grossMinutes - breakDeductedMinutes);
   const netDecimalHours = Number((netMinutes / 60).toFixed(2));
   const isSunday = dateIso ? isSundayISO(dateIso) : false;
-  const overtimeMinutes = isSunday
-    ? netMinutes
-    : Math.max(0, netMinutes - STANDARD_SHIFT_MINUTES);
+
+  // Present Day (P) = 1 only for complete 8h+ shift on Mon-Sat.
+  // <8h Mon-Sat goes into Normal Hours (H); >8h overtime & Sunday 100% also go into Normal Hours (H).
+  let presentCount = 0;
+  let overtimeMinutes = 0;
+  let grossNormalMinutes = 0;
+
+  if (isSunday) {
+    presentCount = 0;
+    overtimeMinutes = netMinutes;
+    grossNormalMinutes = netMinutes;
+  } else if (netMinutes >= STANDARD_SHIFT_MINUTES) {
+    presentCount = 1;
+    overtimeMinutes = netMinutes - STANDARD_SHIFT_MINUTES;
+    grossNormalMinutes = overtimeMinutes;
+  } else {
+    presentCount = 0;
+    overtimeMinutes = 0;
+    grossNormalMinutes = netMinutes;
+  }
+
+  const safeThikadaMinutes = Math.max(0, Math.round(thikadaMinutes || 0));
+  const normalMinutes = Math.max(0, grossNormalMinutes - safeThikadaMinutes);
+  const normalDecimalHours = Number((normalMinutes / 60).toFixed(2));
   const overtimeDecimalHours = Number((overtimeMinutes / 60).toFixed(2));
-  const status: AttendanceStatus = netMinutes < 240 ? 'short_shift' : 'completed';
+  const thikadaDecimalHours = Number((safeThikadaMinutes / 60).toFixed(2));
+  const status: AttendanceStatus =
+    isSunday && netMinutes > 0
+      ? 'completed'
+      : netMinutes >= STANDARD_SHIFT_MINUTES
+      ? 'completed'
+      : 'short_shift';
 
   return {
     grossMinutes,
     breakDeductedMinutes,
     netMinutes,
     netDecimalHours,
+    presentCount,
     overtimeMinutes,
     overtimeDecimalHours,
+    thikadaMinutes: safeThikadaMinutes,
+    thikadaDecimalHours,
+    grossNormalMinutes,
+    normalMinutes,
+    normalDecimalHours,
     isSunday,
     isOvernight,
     status,
@@ -176,7 +216,8 @@ export function calculateShiftMetrics(
   outTime: string,
   breakMinutes = 30,
   dateIso?: string,
-  pausedMinutes = 0
+  pausedMinutes = 0,
+  thikadaMinutes = 0
 ): ShiftCalculationResult {
   const inMins = parseTimeToMinutes(inTime);
   let outMins = parseTimeToMinutes(outTime);
@@ -189,7 +230,91 @@ export function calculateShiftMetrics(
 
   const spanMinutes = Math.max(0, outMins - inMins);
   const activeGrossMinutes = Math.max(0, spanMinutes - Math.max(0, pausedMinutes));
-  return calculateMetricsFromWorkedMinutes(activeGrossMinutes, breakMinutes, dateIso, isOvernight);
+  return calculateMetricsFromWorkedMinutes(
+    activeGrossMinutes,
+    breakMinutes,
+    dateIso,
+    isOvernight,
+    thikadaMinutes
+  );
+}
+
+export interface RecordPayrollBreakdown {
+  isSunday: boolean;
+  presentCount: number;
+  overtimeMinutes: number;
+  overtimeDecimalHours: number;
+  thikadaMinutes: number;
+  thikadaDecimalHours: number;
+  grossNormalMinutes: number;
+  normalMinutes: number;
+  normalDecimalHours: number;
+}
+
+export function getRecordPayroll(r: AttendanceRecord): RecordPayrollBreakdown {
+  const isSun = r.isSunday ?? isSundayISO(r.date);
+  if (!r.outTime || r.netMinutes === null) {
+    return {
+      isSunday: isSun,
+      presentCount: 0,
+      overtimeMinutes: 0,
+      overtimeDecimalHours: 0,
+      thikadaMinutes: Math.max(0, Math.round(r.thikadaMinutes ?? 0)),
+      thikadaDecimalHours: Number((Math.max(0, r.thikadaMinutes ?? 0) / 60).toFixed(2)),
+      grossNormalMinutes: 0,
+      normalMinutes: 0,
+      normalDecimalHours: 0,
+    };
+  }
+
+  const presentCount =
+    typeof r.presentCount === 'number'
+      ? r.presentCount
+      : !isSun && r.netMinutes >= STANDARD_SHIFT_MINUTES
+      ? 1
+      : 0;
+
+  const overtimeMinutes =
+    typeof r.overtimeMinutes === 'number'
+      ? r.overtimeMinutes
+      : isSun
+      ? r.netMinutes
+      : Math.max(0, r.netMinutes - STANDARD_SHIFT_MINUTES);
+
+  const grossNormalMinutes = isSun
+    ? r.netMinutes
+    : r.netMinutes >= STANDARD_SHIFT_MINUTES
+    ? r.netMinutes - STANDARD_SHIFT_MINUTES
+    : r.netMinutes;
+
+  const thikadaMinutes = Math.max(0, Math.round(r.thikadaMinutes ?? 0));
+  const normalMinutes =
+    typeof r.normalMinutes === 'number'
+      ? r.normalMinutes
+      : Math.max(0, grossNormalMinutes - thikadaMinutes);
+
+  return {
+    isSunday: isSun,
+    presentCount,
+    overtimeMinutes,
+    overtimeDecimalHours: Number((overtimeMinutes / 60).toFixed(2)),
+    thikadaMinutes,
+    thikadaDecimalHours: Number((thikadaMinutes / 60).toFixed(2)),
+    grossNormalMinutes,
+    normalMinutes,
+    normalDecimalHours: Number((normalMinutes / 60).toFixed(2)),
+  };
+}
+
+export function formatMonthLabel(yearMonth: string): string {
+  const [yStr, mStr] = yearMonth.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  if (!y || !m || m < 1 || m > 12) return yearMonth;
+  return new Date(y, m - 1, 1).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
 }
 
 export function getMonthDays(
