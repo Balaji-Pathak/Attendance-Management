@@ -1,20 +1,18 @@
-import { initializeApp } from 'firebase/app';
 import {
-  getAuth,
   signInWithPopup,
   GoogleAuthProvider,
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from './firebaseClient';
+
+export const PRIMARY_ADMIN_EMAIL = 'balajeepathak74@gmail.com';
 
 export const WORKSPACE_SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/drive.file',
 ];
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
 
 const provider = new GoogleAuthProvider();
 for (const scope of WORKSPACE_SCOPES) {
@@ -29,28 +27,32 @@ let isSigningIn = false;
 let cachedAccessToken: string | null = null;
 
 export const initAuth = (
-  onAuthSuccess?: (user: User, token: string) => void,
-  onAuthFailure?: (user: User | null) => void
+  onAuthChange: (user: User | null, hasToken: boolean) => void
 ) => {
   return onAuthStateChanged(auth, (user: User | null) => {
-    if (user) {
-      if (cachedAccessToken) {
-        onAuthSuccess?.(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        onAuthFailure?.(user);
-      }
-    } else {
+    if (!user && !isSigningIn) {
       cachedAccessToken = null;
-      onAuthFailure?.(null);
     }
+    onAuthChange(user, Boolean(user && cachedAccessToken));
   });
+};
+
+export const checkIsAuthorizedAdmin = async (user: User | null): Promise<boolean> => {
+  if (!user || !user.emailVerified) return false;
+  if (user.email?.toLowerCase() === PRIMARY_ADMIN_EMAIL) {
+    return true;
+  }
+  try {
+    const snap = await getDoc(doc(db, 'admins', user.uid));
+    return snap.exists();
+  } catch {
+    return false;
+  }
 };
 
 export const googleSignIn = async (): Promise<{
   user: User;
   accessToken: string;
-  idToken: string;
 }> => {
   try {
     isSigningIn = true;
@@ -59,15 +61,14 @@ export const googleSignIn = async (): Promise<{
     if (!credential?.accessToken) {
       throw new Error('Could not obtain Google access token. Please try signing in again.');
     }
-    const idToken = await result.user.getIdToken();
     cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken, idToken };
+    return { user: result.user, accessToken: cachedAccessToken };
   } catch (err: unknown) {
     const fbErr = err as { code?: string; message?: string };
     if (fbErr?.code === 'auth/unauthorized-domain') {
       const host = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
       throw new Error(
-        `Google Sign-In is not authorized for "${host}". Open the app from your AI Studio preview URL or add "${host}" in Firebase Auth Authorized Domains. You can also unlock with your Admin Password.`
+        `Google Sign-In is not authorized for "${host}". Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`
       );
     }
     throw err;

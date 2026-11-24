@@ -4,7 +4,6 @@ import {
   ExternalLink,
   FilePlus2,
   FileSpreadsheet,
-  KeyRound,
   Link2,
   LogOut,
   RefreshCw,
@@ -28,7 +27,6 @@ interface GoogleSheetsSyncViewProps {
   onRequestSyncAll: () => void;
   onPullFromSheet: () => void;
   onDisconnectSheet: () => void;
-  onChangeAdminPassword: (newPassword: string) => Promise<void>;
 }
 
 export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
@@ -46,28 +44,12 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
   onRequestSyncAll,
   onPullFromSheet,
   onDisconnectSheet,
-  onChangeAdminPassword,
 }) => {
   const [newSheetTitle, setNewSheetTitle] = useState('GateLog Attendance Master');
   const [manualUrlOrId, setManualUrlOrId] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [savingPw, setSavingPw] = useState(false);
-
-  const handlePasswordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newPassword.trim().length < 4) return;
-    setSavingPw(true);
-    try {
-      await onChangeAdminPassword(newPassword.trim());
-      setNewPassword('');
-    } finally {
-      setSavingPw(false);
-    }
-  };
 
   return (
     <div className="space-y-6">
-      {/* Google Account Connection */}
       <section className="rounded-xl border border-slate-200 bg-white p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -77,7 +59,7 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
             <p className="mt-1 text-xs text-slate-500">
               {hasGoogleToken && user
                 ? `Connected as ${user.displayName || user.email} (${user.email})`
-                : 'Sign in with Google to create and synchronize your Master Attendance Sheet and Individual Employee Sheets.'}
+                : 'Grant Google Sheets & Drive permission to create and synchronize your Master Attendance Sheet and Individual Employee Sheets.'}
             </p>
           </div>
 
@@ -89,13 +71,13 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
                 className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
               >
                 <LogOut className="h-3.5 w-3.5" />
-                <span>Disconnect Google</span>
+                <span>Sign Out</span>
               </button>
             ) : (
               <GoogleSignInButton
                 onClick={onGoogleLogin}
                 disabled={isSigningIn}
-                label={isSigningIn ? 'Signing in...' : 'Sign in with Google'}
+                label={isSigningIn ? 'Signing in...' : 'Connect Google Sheets'}
               />
             )}
           </div>
@@ -104,7 +86,6 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
 
       {hasGoogleToken && (
         <>
-          {/* Master Workbook */}
           <section className="rounded-xl border border-slate-200 bg-white p-6">
             {sheetConfig ? (
               <div className="space-y-5">
@@ -247,7 +228,6 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
             )}
           </section>
 
-          {/* Drive List */}
           <section className="rounded-xl border border-slate-200 bg-white">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
@@ -329,35 +309,6 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
           </section>
         </>
       )}
-
-      {/* Admin Password Management */}
-      <section className="rounded-xl border border-slate-200 bg-white p-6">
-        <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-          <KeyRound className="h-4 w-4 text-slate-700" />
-          <span>Update Admin Password</span>
-        </div>
-        <p className="mt-1 text-xs text-slate-500">
-          Change the Admin unlock password used to protect Master Attendance, Individual Sheets, Employees, and Google Sheets Sync.
-        </p>
-        <form onSubmit={handlePasswordSubmit} className="mt-4 flex max-w-md gap-2">
-          <input
-            type="password"
-            minLength={4}
-            required
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            placeholder="New Admin password (min 4 chars)..."
-            className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={savingPw || newPassword.trim().length < 4}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap shrink-0"
-          >
-            {savingPw ? 'Saving...' : 'Update Password'}
-          </button>
-        </form>
-      </section>
     </div>
   );
 };

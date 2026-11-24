@@ -15,7 +15,6 @@ import {
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import {
-  AdminAuthStatus,
   AttendanceRecord,
   ConfirmRequest,
   DriveSpreadsheetItem,
@@ -25,18 +24,34 @@ import {
   SheetConfig,
 } from './types/attendance';
 import {
-  getBrowserTimeZone,
   getEmployeeSheetTabName,
   getTodayISO,
   sortRecordsNewestFirst,
 } from './utils/time';
 import {
+  checkIsAuthorizedAdmin,
   clearCachedToken,
   getAccessToken,
   googleSignIn,
   initAuth,
   logout,
 } from './services/firebaseAuth';
+import {
+  adminDeleteAttendance,
+  adminImportFromSheet,
+  adminLoadStarterEmployees,
+  adminMarkRecordsSynced,
+  adminSaveEmployee,
+  adminSaveSheetConfig,
+  adminUpdateAttendance,
+  guardMarkIn,
+  guardMarkOut,
+  subscribeActiveEmployees,
+  subscribeAllAttendance,
+  subscribeAllEmployees,
+  subscribeTodayAttendance,
+  subscribeWorkspaceSettings,
+} from './services/firestoreService';
 import {
   createMasterSpreadsheet,
   createOrUpdateStandaloneEmployeeSheet,
@@ -72,45 +87,23 @@ const NAV_ITEMS: Array<{
   { id: 'sheets-sync', label: 'Google Sheets Sync', adminOnly: true, icon: FileSpreadsheet },
 ];
 
-async function parseApiJson<T>(res: Response): Promise<T> {
-  const text = await res.text();
-  if (!text) {
-    throw new Error(`Empty response from server (HTTP ${res.status}).`);
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(
-      `Server returned an unexpected response (HTTP ${res.status}). Please refresh and try again.`
-    );
-  }
-}
-
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavSection>('guard-gate');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Admin server-verified Bearer token (strictly in React memory, never in localStorage)
-  const [adminToken, setAdminToken] = useState<string | null>(null);
-  const [adminAuthStatus, setAdminAuthStatus] = useState<AdminAuthStatus>({
-    hasEnvPasscode: false,
-    isAdminClaimed: false,
-    adminEmail: null,
-  });
-  const [authStatusLoading, setAuthStatusLoading] = useState<boolean>(true);
-  const [authStatusError, setAuthStatusError] = useState<string | null>(null);
-
-  // Google Workspace OAuth state (token strictly in memory in firebaseAuth.ts)
+  // Firebase Auth + Google Workspace OAuth state
   const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [isAdminAuthorized, setIsAdminAuthorized] = useState<boolean>(false);
+  const [isLockedBySession, setIsLockedBySession] = useState<boolean>(false);
   const [hasGoogleToken, setHasGoogleToken] = useState<boolean>(false);
   const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
 
-  // Public Guard state (from /api/gate/status)
+  // Public Guard state (Firestore live subscriptions — no login required)
+  const [todayDate, setTodayDate] = useState<string>(() => getTodayISO());
   const [gateEmployees, setGateEmployees] = useState<GateEmployeeView[]>([]);
   const [todayRecords, setTodayRecords] = useState<AttendanceRecord[]>([]);
-  const [serverDate, setServerDate] = useState<string>(() => getTodayISO());
 
-  // Protected Admin state (from /api/admin/state)
+  // Protected Admin state (Firestore live subscriptions — only when Admin unlocked)
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [sheetConfig, setSheetConfig] = useState<SheetConfig | null>(null);
@@ -121,108 +114,84 @@ export default function App() {
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
 
-  const browserTz = getBrowserTimeZone();
+  const isAdminUnlocked = Boolean(googleUser && isAdminAuthorized && !isLockedBySession);
 
-  const fetchGateStatus = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/gate/status?tz=${encodeURIComponent(browserTz)}`);
-      if (!res.ok) return;
-      const data = await parseApiJson<{
-        serverDate: string;
-        employees: GateEmployeeView[];
-        todayRecords: AttendanceRecord[];
-      }>(res);
-      setServerDate(data.serverDate);
-      setGateEmployees(data.employees);
-      setTodayRecords(data.todayRecords);
-    } catch {
-      // Ignore transient errors on background poll
-    }
-  }, [browserTz]);
-
-  const fetchAdminAuthStatus = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setAuthStatusLoading(true);
-    setAuthStatusError(null);
-    try {
-      const res = await fetch('/api/admin/auth-status');
-      const data = await parseApiJson<AdminAuthStatus & { error?: string }>(res);
-      if (!res.ok) {
-        throw new Error(data.error || `Server error (HTTP ${res.status})`);
-      }
-      setAdminAuthStatus({
-        hasEnvPasscode: Boolean(data.hasEnvPasscode),
-        isAdminClaimed: Boolean(data.isAdminClaimed),
-        adminEmail: data.adminEmail ?? null,
-      });
-    } catch (err) {
-      setAuthStatusError((err as Error).message || 'Could not reach server.');
-    } finally {
-      setAuthStatusLoading(false);
-    }
-  }, []);
-
-  const fetchAdminState = useCallback(
-    async (tokenOverride?: string) => {
-      const token = tokenOverride ?? adminToken;
-      if (!token) return;
-      try {
-        const res = await fetch('/api/admin/state', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.status === 401) {
-          setAdminToken(null);
-          return;
-        }
-        if (!res.ok) return;
-        const data = await parseApiJson<{
-          employees: Employee[];
-          records: AttendanceRecord[];
-          sheetConfig: SheetConfig | null;
-        }>(res);
-        setEmployees(data.employees);
-        setRecords(sortRecordsNewestFirst(data.records));
-        setSheetConfig(data.sheetConfig);
-      } catch {
-        // Ignore transient network errors on background poll
-      }
-    },
-    [adminToken]
-  );
-
-  // Initial load + 15s sync poll
+  // Keep todayDate accurate if a gate tablet stays open past midnight
   useEffect(() => {
-    fetchGateStatus();
-    fetchAdminAuthStatus(true);
-    const interval = setInterval(() => {
-      fetchGateStatus();
-      if (adminToken) {
-        fetchAdminState();
+    const timer = setInterval(() => {
+      const current = getTodayISO();
+      if (current !== todayDate) {
+        setTodayDate(current);
       }
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [fetchGateStatus, fetchAdminAuthStatus, fetchAdminState, adminToken]);
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [todayDate]);
 
-  // Refresh auth-status when navigating to a locked Admin tab
+  // Listen to Firebase Auth state
   useEffect(() => {
-    const item = NAV_ITEMS.find((n) => n.id === activeNav);
-    if (item?.adminOnly && !adminToken) {
-      fetchAdminAuthStatus(false);
-    }
-  }, [activeNav, adminToken, fetchAdminAuthStatus]);
-
-  useEffect(() => {
-    const unsubscribe = initAuth(
-      (authedUser) => {
-        setGoogleUser(authedUser);
-        setHasGoogleToken(Boolean(getAccessToken()));
-      },
-      (maybeUser) => {
-        setGoogleUser(maybeUser);
-        setHasGoogleToken(false);
+    const unsubscribe = initAuth(async (authedUser, hasToken) => {
+      setGoogleUser(authedUser);
+      setHasGoogleToken(hasToken);
+      if (authedUser) {
+        const authorized = await checkIsAuthorizedAdmin(authedUser);
+        setIsAdminAuthorized(authorized);
+      } else {
+        setIsAdminAuthorized(false);
+        setIsLockedBySession(false);
       }
-    );
+    });
     return () => unsubscribe();
   }, []);
+
+  // Public Guard Firestore listeners (active employees + today's attendance)
+  useEffect(() => {
+    const unsubEmps = subscribeActiveEmployees(
+      (list) => setGateEmployees(list),
+      (err) => {
+        setNotice({ type: 'error', message: `Could not load active staff: ${err.message}` });
+      }
+    );
+    const unsubToday = subscribeTodayAttendance(
+      todayDate,
+      (list) => setTodayRecords(list),
+      (err) => {
+        setNotice({ type: 'error', message: `Could not load today's attendance: ${err.message}` });
+      }
+    );
+    return () => {
+      unsubEmps();
+      unsubToday();
+    };
+  }, [todayDate]);
+
+  // Protected Admin Firestore listeners (only attached when Admin is unlocked)
+  useEffect(() => {
+    if (!isAdminUnlocked) {
+      setEmployees([]);
+      setRecords([]);
+      setSheetConfig(null);
+      return;
+    }
+
+    const unsubEmps = subscribeAllEmployees(
+      (list) => setEmployees(list),
+      (err) => setNotice({ type: 'error', message: err.message })
+    );
+    const unsubAtt = subscribeAllAttendance(
+      (list) => setRecords(list),
+      (err) => setNotice({ type: 'error', message: err.message })
+    );
+    const unsubSettings = subscribeWorkspaceSettings(
+      (cfg) => setSheetConfig(cfg),
+      (err) => setNotice({ type: 'error', message: err.message })
+    );
+
+    return () => {
+      unsubEmps();
+      unsubAtt();
+      unsubSettings();
+    };
+  }, [isAdminUnlocked]);
 
   const handleGoogleError = useCallback((err: unknown, fallbackMsg: string) => {
     const errorObj = err as Error & { status?: number };
@@ -231,7 +200,7 @@ export default function App() {
       setHasGoogleToken(false);
       setNotice({
         type: 'error',
-        message: 'Google session expired. Please sign in with Google again.',
+        message: 'Google Sheets session expired. Please reconnect Google Sheets.',
       });
       return;
     }
@@ -259,116 +228,69 @@ export default function App() {
   );
 
   // ============================================================================
-  // GUARD ACTIONS (No login required, server enforces live time & 30m break)
+  // GUARD ACTIONS (No login required, live time + 30m break enforced)
   // ============================================================================
   const handleGuardMarkIn = async (empId: string) => {
-    const res = await fetch('/api/gate/mark-in', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ empId, tz: browserTz }),
-    });
-    const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
-    if (!res.ok) {
-      setNotice({ type: 'error', message: body.error || 'Could not mark check-in.' });
-      return;
+    const emp = gateEmployees.find((e) => e.id === empId);
+    if (!emp) return;
+    try {
+      const created = await guardMarkIn(emp);
+      setNotice({
+        type: 'success',
+        message: `Marked IN: ${created.empName} at ${created.inTime}.`,
+      });
+    } catch (err) {
+      setNotice({
+        type: 'error',
+        message: (err as Error).message || 'Could not mark check-in.',
+      });
     }
-    await fetchGateStatus();
-    if (adminToken) await fetchAdminState();
-    setNotice({
-      type: 'success',
-      message: `Marked IN: ${body.record?.empName} at ${body.record?.inTime}.`,
-    });
   };
 
   const handleGuardMarkOut = async (recordId: string) => {
-    const res = await fetch('/api/gate/mark-out', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recordId, tz: browserTz }),
-    });
-    const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
-    if (!res.ok) {
-      setNotice({ type: 'error', message: body.error || 'Could not mark check-out.' });
-      return;
+    const rec = todayRecords.find((r) => r.id === recordId);
+    if (!rec) return;
+    try {
+      const updated = await guardMarkOut(rec);
+      setNotice({
+        type: 'success',
+        message: `Marked OUT: ${updated.empName} (${updated.netDecimalHours?.toFixed(2)}h after 30m break).`,
+      });
+    } catch (err) {
+      setNotice({
+        type: 'error',
+        message: (err as Error).message || 'Could not mark check-out.',
+      });
     }
-    await fetchGateStatus();
-    if (adminToken) await fetchAdminState();
-    setNotice({
-      type: 'success',
-      message: `Marked OUT: ${body.record?.empName} (${body.record?.netDecimalHours?.toFixed(2)}h after 30m break).`,
-    });
   };
 
   // ============================================================================
   // ADMIN AUTH ACTIONS
   // ============================================================================
-  const handleSetupPassword = async (password: string) => {
-    const res = await fetch('/api/admin/setup-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    });
-    const body = await parseApiJson<{ token?: string; error?: string }>(res);
-    if (!res.ok || !body.token) {
-      await fetchAdminAuthStatus(false);
-      throw new Error(body.error || 'Could not set Admin password.');
-    }
-    setAdminToken(body.token);
-    await fetchAdminAuthStatus(false);
-    await fetchAdminState(body.token);
-    setNotice({
-      type: 'success',
-      message: 'Admin password saved and Admin panel unlocked.',
-    });
-  };
-
-  const handlePasswordLogin = async (password: string) => {
-    const res = await fetch('/api/admin/login-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    });
-    const body = await parseApiJson<{ token?: string; error?: string }>(res);
-    if (!res.ok || !body.token) {
-      throw new Error(body.error || 'Incorrect Admin password.');
-    }
-    setAdminToken(body.token);
-    await fetchAdminState(body.token);
-    setNotice({
-      type: 'success',
-      message: 'Admin panel unlocked.',
-    });
-  };
-
   const handleGoogleAdminLogin = async () => {
     setIsLoggingInGoogle(true);
     setNotice(null);
     try {
-      const { user: authedUser, accessToken, idToken } = await googleSignIn();
+      const { user: authedUser, accessToken } = await googleSignIn();
       setGoogleUser(authedUser);
       setHasGoogleToken(true);
 
-      const res = await fetch('/api/admin/google-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      const body = await parseApiJson<{ token?: string; error?: string }>(res);
-      if (!res.ok || !body.token) {
+      const authorized = await checkIsAuthorizedAdmin(authedUser);
+      setIsAdminAuthorized(authorized);
+
+      if (!authorized) {
         setNotice({
           type: 'error',
-          message: body.error || 'This Google account is not authorized as Admin.',
+          message: `${authedUser.email} is not authorized for Admin access.`,
         });
         return;
       }
 
-      setAdminToken(body.token);
-      await fetchAdminAuthStatus(false);
-      await fetchAdminState(body.token);
+      setIsLockedBySession(false);
       await refreshDriveFiles(accessToken);
       setNotice({
         type: 'success',
-        message: `Admin unlocked via ${authedUser.email}.`,
+        message: `Admin unlocked as ${authedUser.email}.`,
       });
     } catch (err) {
       handleGoogleError(err, 'Google sign-in failed or was cancelled.');
@@ -395,9 +317,14 @@ export default function App() {
     }
   };
 
-  const handleLockAdmin = () => {
-    setAdminToken(null);
+  const handleLockAdmin = async () => {
+    setIsLockedBySession(true);
     setActiveNav('guard-gate');
+    await logout();
+    setGoogleUser(null);
+    setHasGoogleToken(false);
+    setIsAdminAuthorized(false);
+    setDriveFiles([]);
     setNotice({
       type: 'info',
       message: 'Admin panel locked. Guard Gate Desk remains open.',
@@ -408,47 +335,15 @@ export default function App() {
     await logout();
     setGoogleUser(null);
     setHasGoogleToken(false);
+    setIsAdminAuthorized(false);
     setDriveFiles([]);
-    setNotice({ type: 'info', message: 'Disconnected Google Workspace account.' });
-  };
-
-  const handleChangeAdminPassword = async (newPassword: string) => {
-    if (!adminToken) return;
-    const res = await fetch('/api/admin/change-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({ newPassword }),
-    });
-    const body = await parseApiJson<{ error?: string }>(res);
-    if (!res.ok) {
-      setNotice({ type: 'error', message: body.error || 'Failed to update password.' });
-      return;
-    }
-    await fetchAdminAuthStatus(false);
-    setNotice({ type: 'success', message: 'Admin password updated.' });
+    setActiveNav('guard-gate');
+    setNotice({ type: 'info', message: 'Signed out of Google Admin account.' });
   };
 
   // ============================================================================
   // ADMIN DATA & GOOGLE SHEETS MUTATIONS
   // ============================================================================
-  const persistSheetConfigOnServer = async (
-    cfg: SheetConfig | null,
-    markSynced = false
-  ) => {
-    if (!adminToken) return;
-    await fetch('/api/admin/sheet-config', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({ sheetConfig: cfg, markSynced }),
-    });
-  };
-
   const syncOneEmployeeAndMaster = async (
     employee: Employee,
     nextEmployees: Employee[],
@@ -465,36 +360,19 @@ export default function App() {
         nextEmployees,
         nextRecords
       );
-      setSheetConfig(updatedCfg);
-      setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
-      await persistSheetConfigOnServer(updatedCfg, true);
+      await adminSaveSheetConfig(updatedCfg);
+      await adminMarkRecordsSynced(nextRecords);
     } catch (err) {
-      handleGoogleError(err, 'Saved in server, but Google Sheets sync failed.');
+      handleGoogleError(err, 'Saved in Firestore, but Google Sheets sync failed.');
     } finally {
       setIsSyncing(false);
     }
   };
 
   const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
-    if (!adminToken) return;
-
-    const saveToServer = async () => {
-      const res = await fetch('/api/admin/employees', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify(emp),
-      });
-      const body = await parseApiJson<{ employees?: Employee[]; error?: string }>(res);
-      if (!res.ok || !body.employees) {
-        throw new Error(body.error || 'Failed to save employee.');
-      }
-      setEmployees(body.employees);
-      await fetchGateStatus();
-      return body.employees;
-    };
+    const nextEmployees = isNew
+      ? [...employees, emp]
+      : employees.map((e) => (e.id === emp.id ? emp : e));
 
     if (sheetConfig && getAccessToken()) {
       setConfirmRequest({
@@ -509,8 +387,8 @@ export default function App() {
         ],
         confirmLabel: isNew ? 'Add & Sync' : 'Save & Sync',
         onConfirm: async () => {
-          const nextEmps = await saveToServer();
-          await syncOneEmployeeAndMaster(emp, nextEmps, records);
+          await adminSaveEmployee(emp);
+          await syncOneEmployeeAndMaster(emp, nextEmployees, records);
           setNotice({
             type: 'success',
             message: `${isNew ? 'Added' : 'Updated'} ${emp.name} and synced to Google Sheets.`,
@@ -518,7 +396,7 @@ export default function App() {
         },
       });
     } else {
-      await saveToServer();
+      await adminSaveEmployee(emp);
       setNotice({
         type: 'success',
         message: `${isNew ? 'Added' : 'Updated'} ${emp.name}.`,
@@ -531,53 +409,19 @@ export default function App() {
   };
 
   const handleLoadStarterRoster = async () => {
-    if (!adminToken) return;
-    const res = await fetch('/api/admin/employees/starter', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}` },
+    await adminLoadStarterEmployees();
+    setNotice({
+      type: 'success',
+      message: 'Loaded 5 starter employees. Guard can now mark check-in and check-out.',
     });
-    const body = await parseApiJson<{ employees?: Employee[]; error?: string }>(res);
-    if (res.ok && body.employees) {
-      setEmployees(body.employees);
-      await fetchGateStatus();
-      setNotice({
-        type: 'success',
-        message: 'Loaded 5 starter employees. Guard can now mark check-in and check-out.',
-      });
-    }
   };
 
   const handleUpdateRecord = async (updated: AttendanceRecord) => {
-    if (!adminToken) return;
-
-    const saveToServer = async () => {
-      const res = await fetch(`/api/admin/records/${encodeURIComponent(updated.id)}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          date: updated.date,
-          inTime: updated.inTime,
-          outTime: updated.outTime,
-          breakMinutes: updated.breakMinutes,
-        }),
-      });
-      const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
-      if (!res.ok || !body.record) {
-        throw new Error(body.error || 'Failed to update record.');
-      }
-      const nextRecords = sortRecordsNewestFirst(
-        records.map((r) => (r.id === updated.id ? body.record! : r))
-      );
-      setRecords(nextRecords);
-      await fetchGateStatus();
-      return nextRecords;
-    };
-
     const emp = employees.find(
       (e) => e.id === updated.empId || e.empCode === updated.empCode
+    );
+    const nextRecords = sortRecordsNewestFirst(
+      records.map((r) => (r.id === updated.id ? updated : r))
     );
 
     if (sheetConfig && getAccessToken() && emp) {
@@ -591,7 +435,7 @@ export default function App() {
         ],
         confirmLabel: 'Save & Sync',
         onConfirm: async () => {
-          const nextRecords = await saveToServer();
+          await adminUpdateAttendance(updated);
           await syncOneEmployeeAndMaster(emp, employees, nextRecords);
           setNotice({
             type: 'success',
@@ -600,7 +444,7 @@ export default function App() {
         },
       });
     } else {
-      await saveToServer();
+      await adminUpdateAttendance(updated);
       setNotice({
         type: 'success',
         message: `Updated ${updated.empName}'s attendance entry.`,
@@ -609,7 +453,6 @@ export default function App() {
   };
 
   const handleDeleteRecord = (record: AttendanceRecord) => {
-    if (!adminToken) return;
     const emp = employees.find(
       (e) => e.id === record.empId || e.empCode === record.empCode
     );
@@ -621,18 +464,12 @@ export default function App() {
       affectedTarget: hasSheet ? sheetConfig?.spreadsheetTitle : undefined,
       details: hasSheet
         ? ['Removes row from Master Attendance and employee sheet tab']
-        : ['Removes entry from server attendance register'],
+        : ['Removes entry from Firestore attendance register'],
       confirmLabel: 'Delete Entry',
       destructive: true,
       onConfirm: async () => {
-        const res = await fetch(`/api/admin/records/${encodeURIComponent(record.id)}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${adminToken}` },
-        });
-        if (!res.ok) return;
+        await adminDeleteAttendance(record.id);
         const nextRecords = records.filter((r) => r.id !== record.id);
-        setRecords(nextRecords);
-        await fetchGateStatus();
         if (hasSheet && emp) {
           await syncOneEmployeeAndMaster(emp, employees, nextRecords);
         }
@@ -661,9 +498,8 @@ export default function App() {
         setIsSyncing(true);
         try {
           const cfg = await createMasterSpreadsheet(token, title, employees, records);
-          setSheetConfig(cfg);
-          setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
-          await persistSheetConfigOnServer(cfg, true);
+          await adminSaveSheetConfig(cfg);
+          await adminMarkRecordsSynced(records);
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
@@ -685,35 +521,19 @@ export default function App() {
     setIsSyncing(true);
     try {
       const loaded = await loadWorkbookData(token, spreadsheetId);
-      setSheetConfig(loaded.config);
-
-      if (loadDataIntoApp && adminToken) {
+      if (loadDataIntoApp) {
         const nextEmps = loaded.employees.length > 0 ? loaded.employees : employees;
         const nextRecs =
           loaded.records.length > 0
             ? sortRecordsNewestFirst(loaded.records)
             : records;
-        setEmployees(nextEmps);
-        setRecords(nextRecs);
-        await fetch('/api/admin/import-from-sheet', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`,
-          },
-          body: JSON.stringify({
-            employees: nextEmps,
-            records: nextRecs,
-            sheetConfig: loaded.config,
-          }),
-        });
-        await fetchGateStatus();
+        await adminImportFromSheet(nextEmps, nextRecs, loaded.config);
         setNotice({
           type: 'success',
           message: `Loaded ${loaded.employees.length} employees and ${loaded.records.length} entries from "${loaded.config.spreadsheetTitle}".`,
         });
       } else {
-        await persistSheetConfigOnServer(loaded.config, false);
+        await adminSaveSheetConfig(loaded.config);
         setNotice({
           type: 'success',
           message: `Connected to "${loaded.config.spreadsheetTitle}".`,
@@ -732,7 +552,7 @@ export default function App() {
       setActiveNav('sheets-sync');
       setNotice({
         type: 'info',
-        message: 'Sign in with Google first to sync with Google Sheets.',
+        message: 'Click "Connect Google Sheets" to grant Google Sheets write permission for this session.',
       });
       return;
     }
@@ -755,9 +575,8 @@ export default function App() {
             employees,
             records
           );
-          setSheetConfig(cfg);
-          setRecords((prev) => prev.map((r) => ({ ...r, syncedToSheet: true })));
-          await persistSheetConfigOnServer(cfg, true);
+          await adminSaveSheetConfig(cfg);
+          await adminMarkRecordsSynced(records);
           setNotice({
             type: 'success',
             message: `Synced all tabs in "${cfg.spreadsheetTitle}".`,
@@ -793,7 +612,14 @@ export default function App() {
 
   const handleRequestStandaloneSheet = (employee: Employee) => {
     const token = getAccessToken();
-    if (!token) return;
+    if (!token) {
+      setActiveNav('sheets-sync');
+      setNotice({
+        type: 'info',
+        message: 'Connect Google Sheets in Google Sheets Sync first.',
+      });
+      return;
+    }
     const isUpdate = Boolean(employee.individualSheetId);
 
     setConfirmRequest({
@@ -806,7 +632,6 @@ export default function App() {
       affectedTarget: `${employee.empCode} - ${employee.name} Attendance`,
       confirmLabel: isUpdate ? 'Update Sheet' : 'Create Sheet',
       onConfirm: async () => {
-        if (!adminToken) return;
         setIsSyncing(true);
         try {
           const res = await createOrUpdateStandaloneEmployeeSheet(token, employee, records);
@@ -815,20 +640,10 @@ export default function App() {
             individualSheetId: res.spreadsheetId,
             individualSheetUrl: res.spreadsheetUrl,
           };
-          const saveRes = await fetch('/api/admin/employees', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${adminToken}`,
-            },
-            body: JSON.stringify(updatedEmp),
-          });
-          const body = await parseApiJson<{ employees?: Employee[] }>(saveRes);
-          const nextEmps =
-            body.employees ??
-            employees.map((e) => (e.id === employee.id ? updatedEmp : e));
-          setEmployees(nextEmps);
-
+          await adminSaveEmployee(updatedEmp);
+          const nextEmps = employees.map((e) =>
+            e.id === employee.id ? updatedEmp : e
+          );
           if (sheetConfig) {
             await syncOneEmployeeAndMaster(updatedEmp, nextEmps, records);
           }
@@ -850,7 +665,7 @@ export default function App() {
     if (!sheetConfig) return;
     setConfirmRequest({
       title: 'Load Data from Google Sheet?',
-      description: `Load employees and attendance records from "${sheetConfig.spreadsheetTitle}" into this app.`,
+      description: `Load employees and attendance records from "${sheetConfig.spreadsheetTitle}" into Firestore.`,
       affectedTarget: sheetConfig.spreadsheetTitle,
       confirmLabel: 'Load from Sheet',
       onConfirm: async () => {
@@ -859,7 +674,6 @@ export default function App() {
     });
   };
 
-  const isAdminUnlocked = Boolean(adminToken);
   const currentNavItem = NAV_ITEMS.find((n) => n.id === activeNav) ?? NAV_ITEMS[0];
   const requiresAdminGate = currentNavItem.adminOnly && !isAdminUnlocked;
 
@@ -971,7 +785,6 @@ export default function App() {
 
       {/* Main Content */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top Bar Contract: Breadcrumb on left, 1 primary action on right */}
         <header className="flex h-16 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -1063,7 +876,7 @@ export default function App() {
             <GuardGateView
               employees={gateEmployees}
               todayRecords={todayRecords}
-              serverDate={serverDate}
+              serverDate={todayDate}
               onMarkIn={handleGuardMarkIn}
               onMarkOut={handleGuardMarkOut}
               onOpenAdminGate={() => setActiveNav('employees')}
@@ -1072,13 +885,9 @@ export default function App() {
 
           {requiresAdminGate && (
             <AdminAuthGate
-              authStatus={adminAuthStatus}
-              authStatusLoading={authStatusLoading}
-              authStatusError={authStatusError}
-              onRetryAuthStatus={() => fetchAdminAuthStatus(true)}
               isSigningInGoogle={isLoggingInGoogle}
-              onPasswordLogin={handlePasswordLogin}
-              onSetupPassword={handleSetupPassword}
+              isLockedBySession={isLockedBySession}
+              signedInEmail={googleUser?.email ?? null}
               onGoogleAdminLogin={handleGoogleAdminLogin}
               onBackToGuard={() => setActiveNav('guard-gate')}
             />
@@ -1131,10 +940,8 @@ export default function App() {
               onRequestSyncAll={handleRequestSyncAll}
               onPullFromSheet={handlePullFromSheet}
               onDisconnectSheet={async () => {
-                setSheetConfig(null);
-                await persistSheetConfigOnServer(null, false);
+                await adminSaveSheetConfig(null);
               }}
-              onChangeAdminPassword={handleChangeAdminPassword}
             />
           )}
         </main>

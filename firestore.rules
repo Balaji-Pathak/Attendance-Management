@@ -1,0 +1,219 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'balajeepathak74@gmail.com'
+          || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        );
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasAll(['id', 'empCode', 'name', 'department', 'breakMinutes', 'active'])
+        && data.keys().hasOnly([
+          'id',
+          'empCode',
+          'name',
+          'department',
+          'breakMinutes',
+          'active',
+          'individualSheetId',
+          'individualSheetUrl'
+        ])
+        && isValidId(data.id)
+        && data.empCode is string && data.empCode.size() >= 1 && data.empCode.size() <= 30
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.department is string && data.department.size() >= 1 && data.department.size() <= 60
+        && data.breakMinutes is int && data.breakMinutes >= 0 && data.breakMinutes <= 180
+        && data.active is bool
+        && (!('individualSheetId' in data) || (data.individualSheetId is string && data.individualSheetId.size() <= 128))
+        && (!('individualSheetUrl' in data) || (data.individualSheetUrl is string && data.individualSheetUrl.size() <= 300));
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll([
+          'id',
+          'date',
+          'empId',
+          'empCode',
+          'empName',
+          'inTime',
+          'outTime',
+          'grossMinutes',
+          'breakMinutes',
+          'netMinutes',
+          'netDecimalHours',
+          'status',
+          'syncedToSheet',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'date',
+          'empId',
+          'empCode',
+          'empName',
+          'inTime',
+          'outTime',
+          'grossMinutes',
+          'breakMinutes',
+          'netMinutes',
+          'netDecimalHours',
+          'status',
+          'syncedToSheet',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.date is string && data.date.size() == 10 && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && isValidId(data.empId)
+        && data.empCode is string && data.empCode.size() >= 1 && data.empCode.size() <= 30
+        && data.empName is string && data.empName.size() >= 1 && data.empName.size() <= 80
+        && data.inTime is string && data.inTime.size() == 5 && data.inTime.matches('^\\d{2}:\\d{2}$')
+        && (data.outTime == null || (data.outTime is string && data.outTime.size() == 5 && data.outTime.matches('^\\d{2}:\\d{2}$')))
+        && (data.grossMinutes == null || (data.grossMinutes is int && data.grossMinutes >= 0 && data.grossMinutes <= 1440))
+        && data.breakMinutes is int && data.breakMinutes >= 0 && data.breakMinutes <= 180
+        && (data.netMinutes == null || (data.netMinutes is int && data.netMinutes >= 0 && data.netMinutes <= 1440))
+        && (data.netDecimalHours == null || (data.netDecimalHours is number && data.netDecimalHours >= 0 && data.netDecimalHours <= 24))
+        && data.status in ['on_duty', 'completed', 'short_shift']
+        && data.syncedToSheet is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceSettings(data) {
+      return data.keys().hasAll(['spreadsheetId', 'spreadsheetTitle', 'spreadsheetUrl', 'tabNames', 'updatedAt'])
+        && data.keys().hasOnly([
+          'spreadsheetId',
+          'spreadsheetTitle',
+          'spreadsheetUrl',
+          'lastSyncedAt',
+          'tabNames',
+          'updatedAt'
+        ])
+        && data.spreadsheetId is string && data.spreadsheetId.size() >= 1 && data.spreadsheetId.size() <= 128
+        && data.spreadsheetTitle is string && data.spreadsheetTitle.size() >= 1 && data.spreadsheetTitle.size() <= 200
+        && data.spreadsheetUrl is string && data.spreadsheetUrl.size() >= 1 && data.spreadsheetUrl.size() <= 300
+        && (!('lastSyncedAt' in data) || data.lastSyncedAt == null || (data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64))
+        && data.tabNames is list && data.tabNames.size() <= 500
+        && (data.tabNames.size() == 0 || data.tabNames[0] is string)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'createdAt'])
+        && data.keys().hasOnly(['email', 'createdAt'])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
+    match /employees/{empId} {
+      allow get: if isValidId(empId) && (isAdmin() || existing().active == true);
+      allow list: if isAdmin() || resource.data.active == true;
+      allow create: if isAdmin() && isValidId(empId) && isValidEmployee(incoming()) && incoming().id == empId;
+      allow update: if isAdmin() && isValidId(empId) && isValidEmployee(incoming()) && incoming().id == existing().id;
+      allow delete: if isAdmin() && isValidId(empId);
+    }
+
+    match /attendance/{recordId} {
+      allow get: if isValidId(recordId) && (isAdmin() || existing().date is string);
+      allow list: if isAdmin() || (resource.data.date is string && resource.data.date.size() == 10);
+      allow create: if isValidId(recordId)
+        && isValidAttendance(incoming())
+        && incoming().id == recordId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/employees/$(incoming().empId))
+        && (
+          isAdmin()
+          || (
+            recordId == incoming().date + '_' + incoming().empId
+            && get(/databases/$(database)/documents/employees/$(incoming().empId)).data.active == true
+            && incoming().status == 'on_duty'
+            && incoming().outTime == null
+            && incoming().grossMinutes == null
+            && incoming().netMinutes == null
+            && incoming().netDecimalHours == null
+            && incoming().breakMinutes == 30
+            && incoming().syncedToSheet == false
+          )
+        );
+      allow update: if isValidId(recordId)
+        && isValidAttendance(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            existing().status == 'on_duty'
+            && existing().outTime == null
+            && incoming().status in ['completed', 'short_shift']
+            && incoming().outTime is string
+            && incoming().grossMinutes is int
+            && incoming().netMinutes is int
+            && incoming().netDecimalHours is number
+            && incoming().date == existing().date
+            && incoming().empId == existing().empId
+            && incoming().empCode == existing().empCode
+            && incoming().empName == existing().empName
+            && incoming().inTime == existing().inTime
+            && incoming().breakMinutes == existing().breakMinutes
+            && incoming().syncedToSheet == false
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'outTime',
+              'grossMinutes',
+              'netMinutes',
+              'netDecimalHours',
+              'status',
+              'syncedToSheet',
+              'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(recordId);
+    }
+
+    match /settings/{settingId} {
+      allow get, list: if isAdmin();
+      allow create, update: if isAdmin()
+        && isValidId(settingId)
+        && isValidWorkspaceSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(settingId);
+    }
+
+    match /admins/{uid} {
+      allow get, list: if isAdmin();
+      allow create, update: if isAdmin()
+        && isValidId(uid)
+        && isValidAdminUser(incoming())
+        && incoming().createdAt == request.time;
+      allow delete: if isAdmin() && isValidId(uid);
+    }
+  }
+}

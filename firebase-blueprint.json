@@ -1,0 +1,203 @@
+{
+  "entities": {
+    "Employee": {
+      "title": "Employee",
+      "description": "Staff profile used on the Guard Gate Desk and synced to Google Sheets.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "empCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "department": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "breakMinutes": {
+          "type": "integer"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "individualSheetId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "individualSheetUrl": {
+          "type": "string",
+          "maxLength": 300
+        }
+      },
+      "required": ["id", "empCode", "name", "department", "breakMinutes", "active"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily employee attendance entry marked by guard with automatic 30-minute break deduction.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "empId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "empCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "empName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "inTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^\\d{2}:\\d{2}$"
+        },
+        "outTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^\\d{2}:\\d{2}$"
+        },
+        "grossMinutes": {
+          "type": "integer"
+        },
+        "breakMinutes": {
+          "type": "integer"
+        },
+        "netMinutes": {
+          "type": "integer"
+        },
+        "netDecimalHours": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["on_duty", "completed", "short_shift"]
+        },
+        "syncedToSheet": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "date",
+        "empId",
+        "empCode",
+        "empName",
+        "inTime",
+        "breakMinutes",
+        "status",
+        "syncedToSheet",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WorkspaceSettings": {
+      "title": "WorkspaceSettings",
+      "description": "Connected Master Google Spreadsheet metadata.",
+      "type": "object",
+      "properties": {
+        "spreadsheetId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "spreadsheetTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "spreadsheetUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "tabNames": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["spreadsheetId", "spreadsheetTitle", "spreadsheetUrl", "tabNames", "updatedAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Delegated admin authorization record keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/employees/{empId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Employee roster documents. Guard reads active employees; Admin manages all employees."
+    },
+    "/attendance/{recordId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Daily attendance records keyed by {date}_{empId}. Guard creates check-in and completes check-out once; Admin can review, edit, or delete."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/WorkspaceSettings" },
+      "description": "Admin-only Google Spreadsheet sync configuration."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Delegated admin UIDs managed by the primary owner admin."
+    }
+  }
+}
