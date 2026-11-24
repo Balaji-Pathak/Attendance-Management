@@ -651,3 +651,102 @@ export async function loadWorkbookData(
     records,
   };
 }
+
+interface DrivePermissionItem {
+  id: string;
+  emailAddress?: string;
+  role?: string;
+}
+
+export async function shareSpreadsheetWithEmails(
+  token: string,
+  spreadsheetId: string,
+  emails: string[],
+  excludeEmail?: string | null
+): Promise<{ shared: string[]; failed: string[] }> {
+  const excluded = excludeEmail?.trim().toLowerCase() ?? '';
+  const targets = Array.from(
+    new Set(
+      emails
+        .map((e) => e.trim().toLowerCase())
+        .filter((e) => e && e !== excluded)
+    )
+  );
+  if (targets.length === 0) {
+    return { shared: [], failed: [] };
+  }
+
+  const alreadyWriter = new Set<string>();
+  try {
+    const perms = await apiFetch<{ permissions?: DrivePermissionItem[] }>(
+      `${DRIVE_BASE}/${encodeURIComponent(spreadsheetId)}/permissions?fields=permissions(id,emailAddress,role)`,
+      token
+    );
+    for (const p of perms.permissions ?? []) {
+      if (
+        p.emailAddress &&
+        (p.role === 'owner' || p.role === 'writer' || p.role === 'fileOrganizer')
+      ) {
+        alreadyWriter.add(p.emailAddress.trim().toLowerCase());
+      }
+    }
+  } catch {
+    // Ignore read errors and attempt permission creation directly
+  }
+
+  const shared: string[] = [];
+  const failed: string[] = [];
+
+  for (const email of targets) {
+    if (alreadyWriter.has(email)) continue;
+    try {
+      await apiFetch(
+        `${DRIVE_BASE}/${encodeURIComponent(spreadsheetId)}/permissions?sendNotificationEmail=false`,
+        token,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            type: 'user',
+            role: 'writer',
+            emailAddress: email,
+          }),
+        }
+      );
+      shared.push(email);
+    } catch {
+      failed.push(email);
+    }
+  }
+
+  return { shared, failed };
+}
+
+export async function revokeSpreadsheetAccess(
+  token: string,
+  spreadsheetId: string,
+  email: string
+): Promise<void> {
+  const target = email.trim().toLowerCase();
+  if (!target) return;
+  try {
+    const perms = await apiFetch<{ permissions?: DrivePermissionItem[] }>(
+      `${DRIVE_BASE}/${encodeURIComponent(spreadsheetId)}/permissions?fields=permissions(id,emailAddress,role)`,
+      token
+    );
+    const match = (perms.permissions ?? []).find(
+      (p) => p.emailAddress?.trim().toLowerCase() === target && p.role !== 'owner'
+    );
+    if (match) {
+      await fetch(
+        `${DRIVE_BASE}/${encodeURIComponent(spreadsheetId)}/permissions/${encodeURIComponent(match.id)}`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+    }
+  } catch {
+    // Non-fatal if caller is not the Drive file owner
+  }
+}
+

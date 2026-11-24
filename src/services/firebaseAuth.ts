@@ -70,9 +70,9 @@ export const googleSignIn = async (): Promise<{
   } catch (err: unknown) {
     const fbErr = err as { code?: string; message?: string };
     if (fbErr?.code === 'auth/unauthorized-domain') {
-      const host = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
       throw new Error(
-        `Google Sign-In is not authorized for "${host}". Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`
+        `Google Sign-In is not enabled for ${host}. Please contact your system administrator.`
       );
     }
     throw err;

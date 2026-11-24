@@ -225,7 +225,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               No attendance logs yet
             </p>
             <p className="mt-1 text-sm text-slate-500">
-              Entries marked by Guard Uncle on the Guard Gate Desk appear here automatically.
+              Entries marked on the Guard Gate Desk appear here automatically.
             </p>
           </div>
         ) : (

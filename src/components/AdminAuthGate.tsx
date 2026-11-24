@@ -1,6 +1,5 @@
 import React from 'react';
 import { Lock, ShieldCheck } from 'lucide-react';
-import { PRIMARY_ADMIN_EMAIL } from '../services/firebaseAuth';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface AdminAuthGateProps {
@@ -30,24 +29,16 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
               {isLockedBySession ? 'Admin Panel Locked' : 'Admin Sign-In Required'}
             </h2>
             <p className="mt-1 text-xs leading-relaxed text-slate-500">
-              Guard Gate Desk remains open with no login required. Sign in with your authorized Admin Google account to manage employees, edit attendance, and sync Google Sheets.
+              Guard Gate Desk remains open for attendance marking. Sign in with an authorized company Google account to manage employees, review attendance logs, and sync Google Sheets.
             </p>
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 space-y-1.5">
-          <div className="font-medium text-slate-800">Authorized Company Admins</div>
-          <div className="text-slate-600 leading-relaxed">
-            Sign in with the primary admin account (
-            <span className="font-mono text-slate-800">{PRIMARY_ADMIN_EMAIL}</span>
-            ) or any company Gmail added under Google Sheets Sync → Authorized Company Admins.
+        {signedInEmail && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800">
+            <span className="font-medium">{signedInEmail}</span> does not have Admin access. Please sign in with an authorized company Admin account.
           </div>
-          {signedInEmail && (
-            <div className="pt-1 text-red-700 font-medium">
-              Currently signed in as {signedInEmail}, which does not have Admin permission yet.
-            </div>
-          )}
-        </div>
+        )}
 
         <div className="flex flex-col items-center gap-3">
           <GoogleSignInButton

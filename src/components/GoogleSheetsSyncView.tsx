@@ -4,10 +4,10 @@ import {
   ExternalLink,
   FilePlus2,
   FileSpreadsheet,
-  Info,
   Link2,
   LogOut,
   RefreshCw,
+  Share2,
   ShieldCheck,
   Trash2,
   UserPlus,
@@ -35,6 +35,7 @@ interface GoogleSheetsSyncViewProps {
   adminEmails: AdminEmailEntry[];
   onAddAdminEmail: (email: string) => Promise<void>;
   onRemoveAdminEmail: (email: string) => void;
+  onShareAllSheetsWithAdmins: () => Promise<void>;
 }
 
 export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
@@ -55,11 +56,13 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
   adminEmails,
   onAddAdminEmail,
   onRemoveAdminEmail,
+  onShareAllSheetsWithAdmins,
 }) => {
   const [newSheetTitle, setNewSheetTitle] = useState('GateLog Attendance Master');
   const [manualUrlOrId, setManualUrlOrId] = useState('');
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [addingAdmin, setAddingAdmin] = useState(false);
+  const [sharingSheets, setSharingSheets] = useState(false);
 
   const handleAdminFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -337,16 +340,36 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
       )}
 
       <section className="rounded-xl border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-6 py-4">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-teal-700 shrink-0" />
-            <h3 className="text-sm font-semibold text-slate-900">
-              Authorized Company Admins
-            </h3>
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 px-6 py-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4 text-teal-700 shrink-0" />
+              <h3 className="text-sm font-semibold text-slate-900">
+                Authorized Company Admins
+              </h3>
+            </div>
+            <p className="mt-1 text-xs text-slate-500">
+              All listed admins can sign in and automatically receive Editor access to the Master Workbook and every employee&apos;s individual Google Sheet.
+            </p>
           </div>
-          <p className="mt-1 text-xs text-slate-500">
-            Allow additional company Gmail accounts to unlock Admin tabs, manage employees, and sync Google Sheets.
-          </p>
+          {hasGoogleToken && (
+            <button
+              type="button"
+              disabled={sharingSheets}
+              onClick={async () => {
+                setSharingSheets(true);
+                try {
+                  await onShareAllSheetsWithAdmins();
+                } finally {
+                  setSharingSheets(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Share2 className="h-3.5 w-3.5" />
+              <span>{sharingSheets ? 'Sharing Sheets...' : 'Share All Sheets with Admins'}</span>
+            </button>
+          )}
         </div>
 
         <div className="p-6 space-y-5">
@@ -356,7 +379,7 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
               required
               value={newAdminEmail}
               onChange={(e) => setNewAdminEmail(e.target.value)}
-              placeholder="colleague@gmail.com"
+              placeholder="colleague@company.com"
               className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
             />
             <button
@@ -365,7 +388,7 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
               className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <UserPlus className="h-3.5 w-3.5" />
-              <span>{addingAdmin ? 'Adding...' : 'Add Admin Gmail'}</span>
+              <span>{addingAdmin ? 'Adding...' : 'Add Admin Email'}</span>
             </button>
           </form>
 
@@ -376,7 +399,7 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
                   {PRIMARY_ADMIN_EMAIL}
                 </div>
                 <div className="mt-0.5 text-xs text-slate-500">
-                  Primary Owner Admin (always authorized)
+                  Primary Company Admin
                 </div>
               </div>
               <span className="text-xs font-medium text-teal-700 whitespace-nowrap shrink-0">
@@ -410,24 +433,10 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
                 </div>
               ))}
           </div>
-
-          <div className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-50 p-3.5 text-xs leading-relaxed text-slate-600">
-            <Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
-            <div>
-              <span className="font-medium text-slate-800">Google OAuth Note for Other Gmails: </span>
-              If a newly added Gmail sees Google&apos;s{' '}
-              <span className="font-mono text-slate-800">Error 403: access_denied</span> screen, open{' '}
-              <span className="font-medium text-slate-800">
-                Google Cloud Console → APIs &amp; Services → OAuth consent screen (Audience)
-              </span>{' '}
-              for project <span className="font-mono text-slate-800">gen-lang-client-0550725378</span> and either add their Gmail under{' '}
-              <span className="font-medium text-slate-800">Test users</span> or click{' '}
-              <span className="font-medium text-slate-800">Publish App</span> so any Google account can sign in.
-            </div>
-          </div>
         </div>
       </section>
     </div>
   );
 };
+
 

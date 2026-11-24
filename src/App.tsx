@@ -25,6 +25,7 @@ import {
   SheetConfig,
 } from './types/attendance';
 import {
+  buildStarterEmployees,
   getEmployeeSheetTabName,
   getTodayISO,
   sortRecordsNewestFirst,
@@ -63,6 +64,8 @@ import {
   extractSpreadsheetId,
   listAppSpreadsheets,
   loadWorkbookData,
+  revokeSpreadsheetAccess,
+  shareSpreadsheetWithEmails,
   syncEmployeeAndMasterTabs,
   syncFullWorkbook,
 } from './services/googleSheets';
@@ -356,6 +359,83 @@ export default function App() {
   // ============================================================================
   // ADMIN DATA & GOOGLE SHEETS MUTATIONS
   // ============================================================================
+  const getAllAdminEmails = useCallback(
+    (extraEmail?: string): string[] => {
+      const list = [
+        PRIMARY_ADMIN_EMAIL,
+        ...adminEmails.map((a) => a.email.toLowerCase()),
+      ];
+      if (extraEmail) {
+        list.push(extraEmail.trim().toLowerCase());
+      }
+      return Array.from(new Set(list.filter(Boolean)));
+    },
+    [adminEmails]
+  );
+
+  const collectAllManagedSheetIds = useCallback(
+    (extraIds: Array<string | undefined | null> = []): string[] => {
+      const ids = [
+        sheetConfig?.spreadsheetId,
+        ...employees.map((e) => e.individualSheetId),
+        ...extraIds,
+      ]
+        .map((id) => (id ? id.trim() : ''))
+        .filter(Boolean);
+      return Array.from(new Set(ids));
+    },
+    [sheetConfig, employees]
+  );
+
+  const shareSheetsWithEmails = useCallback(
+    async (
+      token: string,
+      sheetIds: string[],
+      targetEmails: string[]
+    ): Promise<{ sharedCount: number; failedCount: number }> => {
+      let sharedCount = 0;
+      let failedCount = 0;
+      for (const sheetId of sheetIds) {
+        const res = await shareSpreadsheetWithEmails(
+          token,
+          sheetId,
+          targetEmails,
+          googleUser?.email
+        );
+        sharedCount += res.shared.length;
+        failedCount += res.failed.length;
+      }
+      return { sharedCount, failedCount };
+    },
+    [googleUser]
+  );
+
+  const upsertLocalEmployee = useCallback((emp: Employee) => {
+    setEmployees((prev) => {
+      const exists = prev.some((e) => e.id === emp.id);
+      const next = exists
+        ? prev.map((e) => (e.id === emp.id ? emp : e))
+        : [...prev, emp];
+      return [...next].sort((a, b) => a.empCode.localeCompare(b.empCode));
+    });
+    setGateEmployees((prev) => {
+      if (!emp.active) {
+        return prev.filter((e) => e.id !== emp.id);
+      }
+      const view: GateEmployeeView = {
+        id: emp.id,
+        empCode: emp.empCode,
+        name: emp.name,
+        department: emp.department,
+      };
+      const exists = prev.some((e) => e.id === emp.id);
+      const next = exists
+        ? prev.map((e) => (e.id === emp.id ? view : e))
+        : [...prev, view];
+      return [...next].sort((a, b) => a.empCode.localeCompare(b.empCode));
+    });
+  }, []);
+
   const syncOneEmployeeAndMaster = async (
     employee: Employee,
     nextEmployees: Employee[],
@@ -374,8 +454,13 @@ export default function App() {
       );
       await adminSaveSheetConfig(updatedCfg);
       await adminMarkRecordsSynced(nextRecords);
+      await shareSheetsWithEmails(
+        token,
+        collectAllManagedSheetIds([updatedCfg.spreadsheetId, employee.individualSheetId]),
+        getAllAdminEmails()
+      );
     } catch (err) {
-      handleGoogleError(err, 'Saved in Firestore, but Google Sheets sync failed.');
+      handleGoogleError(err, 'Saved changes, but Google Sheets sync failed.');
     } finally {
       setIsSyncing(false);
     }
@@ -383,35 +468,33 @@ export default function App() {
 
   const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
     const nextEmployees = isNew
-      ? [...employees, emp]
+      ? [...employees, emp].sort((a, b) => a.empCode.localeCompare(b.empCode))
       : employees.map((e) => (e.id === emp.id ? emp : e));
+
+    await adminSaveEmployee(emp);
+    upsertLocalEmployee(emp);
+    setNotice({
+      type: 'success',
+      message: `${isNew ? 'Added' : 'Updated'} ${emp.name}.`,
+    });
 
     if (sheetConfig && getAccessToken()) {
       setConfirmRequest({
-        title: isNew ? 'Add Employee & Create Sheet Tab?' : 'Update Employee in Google Sheets?',
-        description: isNew
-          ? `Add ${emp.name} (${emp.empCode}) and create their individual sheet tab in "${sheetConfig.spreadsheetTitle}".`
-          : `Save changes for ${emp.name} (${emp.empCode}) and update Google Sheets.`,
+        title: isNew ? 'Sync New Employee to Google Sheets?' : 'Sync Updated Employee to Google Sheets?',
+        description: `${emp.name} (${emp.empCode}) is saved. Update "${sheetConfig.spreadsheetTitle}" with their Employees row and individual tab now?`,
         affectedTarget: sheetConfig.spreadsheetTitle,
         details: [
           'Updates Employees tab',
           `Updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
         ],
-        confirmLabel: isNew ? 'Add & Sync' : 'Save & Sync',
+        confirmLabel: 'Sync to Sheet',
         onConfirm: async () => {
-          await adminSaveEmployee(emp);
           await syncOneEmployeeAndMaster(emp, nextEmployees, records);
           setNotice({
             type: 'success',
             message: `${isNew ? 'Added' : 'Updated'} ${emp.name} and synced to Google Sheets.`,
           });
         },
-      });
-    } else {
-      await adminSaveEmployee(emp);
-      setNotice({
-        type: 'success',
-        message: `${isNew ? 'Added' : 'Updated'} ${emp.name}.`,
       });
     }
   };
@@ -421,10 +504,14 @@ export default function App() {
   };
 
   const handleLoadStarterRoster = async () => {
+    const starter = buildStarterEmployees();
     await adminLoadStarterEmployees();
+    for (const emp of starter) {
+      upsertLocalEmployee(emp);
+    }
     setNotice({
       type: 'success',
-      message: 'Loaded 5 starter employees. Guard can now mark check-in and check-out.',
+      message: 'Loaded 5 starter employees. Guard Gate Desk is ready for check-in.',
     });
   };
 
@@ -476,7 +563,7 @@ export default function App() {
       affectedTarget: hasSheet ? sheetConfig?.spreadsheetTitle : undefined,
       details: hasSheet
         ? ['Removes row from Master Attendance and employee sheet tab']
-        : ['Removes entry from Firestore attendance register'],
+        : ['Removes entry from the attendance register'],
       confirmLabel: 'Delete Entry',
       destructive: true,
       onConfirm: async () => {
@@ -512,10 +599,11 @@ export default function App() {
           const cfg = await createMasterSpreadsheet(token, title, employees, records);
           await adminSaveSheetConfig(cfg);
           await adminMarkRecordsSynced(records);
+          await shareSheetsWithEmails(token, [cfg.spreadsheetId], getAllAdminEmails());
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
-            message: `Created "${cfg.spreadsheetTitle}" with ${employees.length} individual employee tabs.`,
+            message: `Created "${cfg.spreadsheetTitle}" with ${employees.length} individual employee tabs and shared with company admins.`,
           });
         } catch (err) {
           handleGoogleError(err, 'Failed to create Google Spreadsheet.');
@@ -540,12 +628,25 @@ export default function App() {
             ? sortRecordsNewestFirst(loaded.records)
             : records;
         await adminImportFromSheet(nextEmps, nextRecs, loaded.config);
+        for (const emp of nextEmps) {
+          upsertLocalEmployee(emp);
+        }
+        await shareSheetsWithEmails(
+          token,
+          collectAllManagedSheetIds([loaded.config.spreadsheetId]),
+          getAllAdminEmails()
+        );
         setNotice({
           type: 'success',
           message: `Loaded ${loaded.employees.length} employees and ${loaded.records.length} entries from "${loaded.config.spreadsheetTitle}".`,
         });
       } else {
         await adminSaveSheetConfig(loaded.config);
+        await shareSheetsWithEmails(
+          token,
+          collectAllManagedSheetIds([loaded.config.spreadsheetId]),
+          getAllAdminEmails()
+        );
         setNotice({
           type: 'success',
           message: `Connected to "${loaded.config.spreadsheetTitle}".`,
@@ -576,6 +677,7 @@ export default function App() {
       details: [
         `${records.length} attendance record(s)`,
         `${employees.length} individual employee sheet tab(s)`,
+        'Ensures all authorized company admins have Editor access',
       ],
       confirmLabel: 'Sync All Tabs',
       onConfirm: async () => {
@@ -589,9 +691,14 @@ export default function App() {
           );
           await adminSaveSheetConfig(cfg);
           await adminMarkRecordsSynced(records);
+          await shareSheetsWithEmails(
+            token,
+            collectAllManagedSheetIds([cfg.spreadsheetId]),
+            getAllAdminEmails()
+          );
           setNotice({
             type: 'success',
-            message: `Synced all tabs in "${cfg.spreadsheetTitle}".`,
+            message: `Synced all tabs in "${cfg.spreadsheetTitle}" and updated admin access.`,
           });
         } catch (err) {
           handleGoogleError(err, 'Failed to sync Google Sheet.');
@@ -653,6 +760,12 @@ export default function App() {
             individualSheetUrl: res.spreadsheetUrl,
           };
           await adminSaveEmployee(updatedEmp);
+          upsertLocalEmployee(updatedEmp);
+          await shareSheetsWithEmails(
+            token,
+            [res.spreadsheetId],
+            getAllAdminEmails()
+          );
           const nextEmps = employees.map((e) =>
             e.id === employee.id ? updatedEmp : e
           );
@@ -662,7 +775,7 @@ export default function App() {
           await refreshDriveFiles(token);
           setNotice({
             type: 'success',
-            message: `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name}.`,
+            message: `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name} and shared with all company admins.`,
           });
         } catch (err) {
           handleGoogleError(err, 'Could not create or update individual Google Sheet.');
@@ -677,7 +790,7 @@ export default function App() {
     if (!sheetConfig) return;
     setConfirmRequest({
       title: 'Load Data from Google Sheet?',
-      description: `Load employees and attendance records from "${sheetConfig.spreadsheetTitle}" into Firestore.`,
+      description: `Load employees and attendance records from "${sheetConfig.spreadsheetTitle}" into GateLog.`,
       affectedTarget: sheetConfig.spreadsheetTitle,
       confirmLabel: 'Load from Sheet',
       onConfirm: async () => {
@@ -691,16 +804,41 @@ export default function App() {
     if (emailLower === PRIMARY_ADMIN_EMAIL) {
       setNotice({
         type: 'info',
-        message: `${PRIMARY_ADMIN_EMAIL} is already the Primary Owner Admin.`,
+        message: `${PRIMARY_ADMIN_EMAIL} is already the Primary Company Admin.`,
       });
       return;
     }
     try {
       await adminAddEmail(emailLower, googleUser?.email || PRIMARY_ADMIN_EMAIL);
-      setNotice({
-        type: 'success',
-        message: `Added ${emailLower} as an authorized Admin Gmail.`,
+      setAdminEmails((prev) => {
+        if (prev.some((e) => e.email === emailLower)) return prev;
+        return [
+          ...prev,
+          {
+            email: emailLower,
+            addedBy: googleUser?.email || PRIMARY_ADMIN_EMAIL,
+            createdAt: new Date().toISOString(),
+          },
+        ].sort((a, b) => a.email.localeCompare(b.email));
       });
+
+      const token = getAccessToken();
+      const sheetIds = collectAllManagedSheetIds();
+      if (token && sheetIds.length > 0) {
+        const res = await shareSheetsWithEmails(token, sheetIds, [emailLower]);
+        setNotice({
+          type: 'success',
+          message:
+            res.failedCount > 0 && res.sharedCount === 0
+              ? `Added ${emailLower} as Admin. Note: Ask the sheet owner to click "Share All Sheets with Admins" to grant Drive access.`
+              : `Added ${emailLower} as Admin and granted Editor access to ${sheetIds.length} attendance sheet(s).`,
+        });
+      } else {
+        setNotice({
+          type: 'success',
+          message: `Added ${emailLower} as an authorized Company Admin.`,
+        });
+      }
     } catch (err) {
       setNotice({
         type: 'error',
@@ -713,19 +851,58 @@ export default function App() {
     const emailLower = email.trim().toLowerCase();
     if (emailLower === PRIMARY_ADMIN_EMAIL) return;
     setConfirmRequest({
-      title: 'Remove Admin Gmail Access?',
-      description: `Revoke Admin dashboard access for ${emailLower}. They will no longer be able to edit employees or attendance.`,
+      title: 'Remove Admin Access?',
+      description: `Revoke Admin dashboard and spreadsheet access for ${emailLower}.`,
       affectedTarget: emailLower,
       confirmLabel: 'Remove Admin',
       destructive: true,
       onConfirm: async () => {
         await adminRemoveEmail(emailLower);
+        setAdminEmails((prev) => prev.filter((e) => e.email !== emailLower));
+        const token = getAccessToken();
+        if (token) {
+          for (const sheetId of collectAllManagedSheetIds()) {
+            await revokeSpreadsheetAccess(token, sheetId, emailLower);
+          }
+        }
         setNotice({
           type: 'info',
           message: `Removed Admin access for ${emailLower}.`,
         });
       },
     });
+  };
+
+  const handleShareAllSheetsWithAdmins = async () => {
+    const token = getAccessToken();
+    if (!token) {
+      setNotice({
+        type: 'info',
+        message: 'Connect Google Sheets first to share spreadsheet access.',
+      });
+      return;
+    }
+    const sheetIds = collectAllManagedSheetIds();
+    const targetEmails = getAllAdminEmails();
+    if (sheetIds.length === 0) {
+      setNotice({
+        type: 'info',
+        message: 'No Master or Individual Google Sheets are connected yet.',
+      });
+      return;
+    }
+    const res = await shareSheetsWithEmails(token, sheetIds, targetEmails);
+    if (res.failedCount > 0 && res.sharedCount === 0) {
+      setNotice({
+        type: 'error',
+        message: 'Could not update sharing on some sheets. Please ensure you own those spreadsheets.',
+      });
+    } else {
+      setNotice({
+        type: 'success',
+        message: `Verified Editor access across ${sheetIds.length} spreadsheet(s) for all authorized company admins.`,
+      });
+    }
   };
 
   const currentNavItem = NAV_ITEMS.find((n) => n.id === activeNav) ?? NAV_ITEMS[0];
@@ -999,6 +1176,7 @@ export default function App() {
               adminEmails={adminEmails}
               onAddAdminEmail={handleAddAdminEmail}
               onRemoveAdminEmail={handleRemoveAdminEmail}
+              onShareAllSheetsWithAdmins={handleShareAllSheetsWithAdmins}
             />
           )}
         </main>
