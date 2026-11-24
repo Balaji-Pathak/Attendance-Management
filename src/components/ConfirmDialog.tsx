@@ -24,7 +24,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({ request, onClose }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/45 p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"

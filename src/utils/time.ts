@@ -67,6 +67,7 @@ export function parseDisplayTimeToHHMM(input: string | null | undefined): string
 }
 
 export const STANDARD_SHIFT_MINUTES = 480; // 8 hours standard shift
+export const BREAK_THRESHOLD_MINUTES = 270; // 4.5 hours minimum before break deduction
 
 export function isSundayISO(dateIso: string): boolean {
   const parts = dateIso.split('-').map(Number);
@@ -155,7 +156,8 @@ export function calculateMetricsFromWorkedMinutes(
 ): ShiftCalculationResult {
   const grossMinutes = Math.max(0, Math.round(grossActiveMinutes));
   const safeBreak = Math.max(0, breakMinutes);
-  const breakDeductedMinutes = grossMinutes >= safeBreak ? safeBreak : grossMinutes;
+  const breakDeductedMinutes =
+    grossMinutes >= BREAK_THRESHOLD_MINUTES ? Math.min(safeBreak, grossMinutes) : 0;
   const netMinutes = Math.max(0, grossMinutes - breakDeductedMinutes);
   const netDecimalHours = Number((netMinutes / 60).toFixed(2));
   const isSunday = dateIso ? isSundayISO(dateIso) : false;

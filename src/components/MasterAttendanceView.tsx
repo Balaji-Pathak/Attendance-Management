@@ -276,7 +276,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-4 py-3 whitespace-nowrap">In Time</th>
                   <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Working (-30m)</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours</th>
                   <th className="px-4 py-3 text-center whitespace-nowrap">P</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Normal (H)</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
@@ -345,7 +345,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                         <div className="inline-flex items-center gap-1">
                           <button
                             type="button"
-                            onClick={() => setEditing({ ...rec })}
+                            onClick={() => {
+                              const empBreakPolicy =
+                                rec.breakMinutes > 0
+                                  ? rec.breakMinutes
+                                  : employees.find((e) => e.id === rec.empId)?.breakMinutes ?? 30;
+                              setEditing({ ...rec, breakMinutes: empBreakPolicy });
+                            }}
                             className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
                             aria-label={`Edit attendance for ${rec.empName}`}
                           >
@@ -467,7 +473,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 <div className="rounded-lg border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-700">
-                      Working ({editPreview.breakDeductedMinutes}m break deducted)
+                      {editPreview.breakDeductedMinutes > 0
+                        ? `Working (${editPreview.breakDeductedMinutes}m break deducted)`
+                        : 'Working (No break < 4.5h)'}
                     </span>
                     <span className="font-mono font-semibold text-teal-900 tabular-nums">
                       {editPreview.netDecimalHours.toFixed(2)}h · P = {editPreview.presentCount}

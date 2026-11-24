@@ -248,7 +248,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-600">
-                Break policy: 30 minutes automatically deducted on every Check-Out.
+                Break policy: 30 minutes automatically deducted only when working hours are 4.5 hours or more.
               </div>
 
               <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">

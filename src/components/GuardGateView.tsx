@@ -189,7 +189,7 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
 
           <div className="text-xs text-slate-600 sm:text-right space-y-1">
             <div className="font-medium text-slate-900">
-              8h Shift · 30m Lunch Break Deducted on Mark Out
+              8h Shift · 30m Lunch Break Deducted Only for 4.5h+ Shifts
             </div>
             <div>Use Stop Timing when staff step out for tea or errands</div>
           </div>
@@ -512,9 +512,11 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                         </div>
                       )}
                       <div className="flex items-center justify-between text-slate-700">
-                        <span>Lunch Break Deducted</span>
+                        <span>Lunch Break</span>
                         <span className="font-mono font-medium text-amber-800 tabular-nums">
-                          -{checkoutPreview.breakDeductedMinutes} min
+                          {checkoutPreview.breakDeductedMinutes > 0
+                            ? `-${checkoutPreview.breakDeductedMinutes} min`
+                            : '0 min (< 4.5h)'}
                         </span>
                       </div>
                       <div className="flex items-center justify-between border-t border-teal-200 pt-2 text-sm font-semibold text-teal-900">

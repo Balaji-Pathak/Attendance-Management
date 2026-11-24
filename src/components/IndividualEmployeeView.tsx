@@ -30,6 +30,7 @@ interface IndividualEmployeeViewProps {
   records: AttendanceRecord[];
   sheetConfig: SheetConfig | null;
   isGoogleAuthed: boolean;
+  isSyncing?: boolean;
   onRequestSyncEmployeeTab: (employee: Employee) => void;
   onRequestStandaloneSheet: (employee: Employee, monthFilter?: string) => void;
   onImportEmployeeSheet: (employee: Employee, sheetUrlOrId: string) => Promise<void>;
@@ -44,7 +45,7 @@ interface IndividualEmployeeViewProps {
     employee: Employee,
     yearMonth: string,
     thikadaMinutes: number
-  ) => Promise<void>;
+  ) => Promise<{ sheetUpdated: boolean }>;
 }
 
 interface MonthBuilderRow {
@@ -73,6 +74,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   records,
   sheetConfig,
   isGoogleAuthed,
+  isSyncing = false,
   onRequestSyncEmployeeTab,
   onRequestStandaloneSheet,
   onImportEmployeeSheet,
@@ -92,6 +94,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const [historyMonth, setHistoryMonth] = useState<string>(() => getCurrentYearMonth());
   const [monthlyThekaHoursInput, setMonthlyThekaHoursInput] = useState<string>('0');
   const [savingMonthlyTheka, setSavingMonthlyTheka] = useState(false);
+  const [thekaFeedback, setThekaFeedback] = useState<string | null>(null);
   const [editingRow, setEditingRow] = useState<AttendanceRecord | null>(null);
   const [savingRowEdit, setSavingRowEdit] = useState(false);
 
@@ -243,8 +246,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     if (!selectedEmployee) return;
     const mins = selectedEmployee.monthlyThikadaMinutes?.[historyMonth] ?? 0;
     setMonthlyThekaHoursInput(String(Number((mins / 60).toFixed(2))));
+    setThekaFeedback(null);
     setEditingRow(null);
-  }, [selectedEmployee, historyMonth, showHistoryModal]);
+  }, [selectedEmployee?.id, historyMonth, showHistoryModal]);
 
   // Populate builder rows whenever modal opens or selected employee/month changes
   useEffect(() => {
@@ -389,7 +393,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       await onSaveEmployeeMonthRecords(
         selectedEmployee,
         builtRecords,
-        isGoogleAuthed && syncBuilderToSheet,
+        syncBuilderToSheet,
         builderMonth
       );
       setShowMonthBuilder(false);
@@ -415,7 +419,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     if (!editingRow) return;
     setSavingRowEdit(true);
     try {
-      await onUpdateSingleRecord({ ...editingRow, thikadaMinutes: 0 });
+      await onUpdateSingleRecord({
+        ...editingRow,
+        breakMinutes: selectedEmployee?.breakMinutes || 30,
+        thikadaMinutes: 0,
+      });
       setEditingRow(null);
     } finally {
       setSavingRowEdit(false);
@@ -427,8 +435,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     const hrs = Math.max(0, Number(monthlyThekaHoursInput) || 0);
     const mins = Math.round(hrs * 60);
     setSavingMonthlyTheka(true);
+    setThekaFeedback(null);
     try {
-      await onSaveMonthlyThikada(selectedEmployee, historyMonth, mins);
+      const res = await onSaveMonthlyThikada(selectedEmployee, historyMonth, mins);
+      const nextNetH = Math.max(0, historyTotals.grossNormalDecimal - mins / 60);
+      setThekaFeedback(
+        res.sheetUpdated
+          ? `Applied ${(mins / 60).toFixed(2)}h Theka · Net Normal Working (H): ${nextNetH.toFixed(2)}h · Google Sheet updated.`
+          : `Applied ${(mins / 60).toFixed(2)}h Theka · Net Normal Working (H): ${nextNetH.toFixed(2)}h · Click Update Google Sheet below to sync.`
+      );
     } finally {
       setSavingMonthlyTheka(false);
     }
@@ -635,7 +650,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 <button
                   type="button"
                   onClick={() => onRequestSyncEmployeeTab(selectedEmployee)}
-                  disabled={!isGoogleAuthed}
+                  disabled={isSyncing}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
@@ -646,8 +661,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
               <button
                 type="button"
                 onClick={() => onRequestStandaloneSheet(selectedEmployee)}
-                disabled={!isGoogleAuthed}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap shrink-0"
+                disabled={isSyncing}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400 whitespace-nowrap shrink-0"
               >
                 <FileSpreadsheet className="h-3.5 w-3.5" />
                 <span>
@@ -708,7 +723,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 />
                 <button
                   type="submit"
-                  disabled={!isGoogleAuthed || isImportingSheet || !importSheetInput.trim()}
+                  disabled={isImportingSheet || !importSheetInput.trim()}
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap shrink-0"
                 >
                   <FolderInput className="h-3.5 w-3.5" />
@@ -716,9 +731,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 </button>
               </div>
               {!isGoogleAuthed && (
-                <p className="text-xs text-amber-800">
-                  Connect Google Sheets in the Google Sheets Sync tab first to read external
-                  spreadsheets.
+                <p className="text-xs text-slate-500">
+                  Clicking Extract &amp; Import Sheet will prompt for Google Drive read access if not yet connected in this session.
                 </p>
               )}
             </form>
@@ -833,11 +847,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             onClick={() =>
                               onRequestStandaloneSheet(selectedEmployee, m.yearMonth)
                             }
-                            disabled={!isGoogleAuthed}
-                            className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
+                            disabled={isSyncing}
+                            className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
                           >
                             <FileSpreadsheet className="h-3.5 w-3.5" />
-                            <span>Sheet</span>
+                            <span>{selectedEmployee.individualSheetId ? 'Update Sheet' : 'Sheet'}</span>
                           </button>
                         </div>
                       </td>
@@ -957,19 +971,19 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       </div>
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-slate-500">Normal (H)</div>
+                      <div className="text-slate-500">Hours Before Theka</div>
                       <div className="mt-0.5 font-mono text-base font-semibold text-slate-800 tabular-nums">
                         {historyTotals.grossNormalDecimal.toFixed(2)}h
                       </div>
                     </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-slate-500">Theka Deduct</div>
-                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-700 tabular-nums">
+                    <div className="rounded-lg border border-red-200 bg-red-50/50 px-3 py-2">
+                      <div className="text-red-800">Theka Working Time</div>
+                      <div className="mt-0.5 font-mono text-base font-semibold text-red-700 tabular-nums">
                         -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
                       </div>
                     </div>
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                      <div className="text-amber-900 font-medium">Final Normal (H)</div>
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
+                      <div className="text-amber-900 font-semibold">Normal Working (H)</div>
                       <div className="mt-0.5 font-mono text-base font-bold text-amber-800 tabular-nums">
                         {historyTotals.finalNetNormalDecimal.toFixed(2)}h
                       </div>
@@ -978,7 +992,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
                   <div className="md:col-span-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <div className="text-[11px] font-semibold text-slate-800">
-                      Month-End Theka Working Hours (Deducted from H)
+                      Month-End Theka Working Hours (Deducted from Normal H)
                     </div>
                     <div className="mt-2 flex items-center gap-2">
                       <input
@@ -987,7 +1001,10 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         max={744}
                         step={0.25}
                         value={monthlyThekaHoursInput}
-                        onChange={(e) => setMonthlyThekaHoursInput(e.target.value)}
+                        onChange={(e) => {
+                          setMonthlyThekaHoursInput(e.target.value);
+                          setThekaFeedback(null);
+                        }}
                         aria-label="Month-end Theka working hours deduction"
                         className="w-28 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
                       />
@@ -995,12 +1012,17 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       <button
                         type="button"
                         onClick={handleSaveMonthlyThekaClick}
-                        disabled={savingMonthlyTheka}
-                        className="ml-auto rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
+                        disabled={savingMonthlyTheka || isSyncing}
+                        className="ml-auto rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400 whitespace-nowrap"
                       >
-                        {savingMonthlyTheka ? 'Saving...' : 'Apply Theka'}
+                        {savingMonthlyTheka ? 'Applying...' : 'Apply Theka'}
                       </button>
                     </div>
+                    {thekaFeedback && (
+                      <div className="mt-2 text-[11px] font-medium text-teal-800">
+                        {thekaFeedback}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -1042,7 +1064,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             ? calculateShiftMetrics(
                                 editingRow.inTime,
                                 editingRow.outTime,
-                                editingRow.breakMinutes,
+                                selectedEmployee.breakMinutes || 30,
                                 editingRow.date,
                                 awayMins
                               )
@@ -1282,12 +1304,16 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     <button
                       type="button"
                       onClick={() => onRequestStandaloneSheet(selectedEmployee, historyMonth)}
-                      disabled={!isGoogleAuthed}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
+                      disabled={isSyncing}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400 whitespace-nowrap"
                     >
                       <FileSpreadsheet className="h-3.5 w-3.5" />
                       <span>
-                        Create / Update {formatMonthLabel(historyMonth)} in Google Sheet
+                        {isSyncing
+                          ? 'Updating Google Sheet...'
+                          : selectedEmployee.individualSheetId
+                          ? `Update ${formatMonthLabel(historyMonth)} in Google Sheet`
+                          : `Create ${formatMonthLabel(historyMonth)} in Google Sheet`}
                       </span>
                     </button>
                   </div>
@@ -1566,16 +1592,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 <label className="flex items-center gap-2 text-xs text-slate-700">
                   <input
                     type="checkbox"
-                    checked={isGoogleAuthed && syncBuilderToSheet}
-                    disabled={!isGoogleAuthed}
+                    checked={syncBuilderToSheet}
                     onChange={(e) => setSyncBuilderToSheet(e.target.checked)}
                     className="h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-700"
                   />
-                  <span>
-                    {isGoogleAuthed
-                      ? 'Also create/update Google Sheet'
-                      : 'Connect Google Sheets to sync'}
-                  </span>
+                  <span>Also create / update Google Sheet</span>
                 </label>
 
                 <button

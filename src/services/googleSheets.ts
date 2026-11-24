@@ -213,9 +213,9 @@ function buildIndividualEmployeeRows(
     `=SUM(G5:G${lastDataRow})`,
     'Total Working (H)',
     `=SUM(F5:F${lastDataRow})`,
-    'Theka Deduct (H)',
+    'Theka Work (H)',
     monthlyThekaDec,
-    'Net Normal Hours (H)',
+    'Net Normal (H)',
     `=MAX(0, SUM(I5:I${lastDataRow})-F2)`,
     '',
   ];
@@ -269,7 +269,7 @@ function buildIndividualEmployeeRows(
       `=-F2`,
     ]);
     rows.push([
-      'NET PAYABLE',
+      'NET PAYABLE (After Theka)',
       '',
       '',
       '',
@@ -287,7 +287,7 @@ function buildIndividualEmployeeRows(
 async function formatSheetHeaders(
   token: string,
   spreadsheetId: string,
-  sheetMeta: Array<{ sheetId: number; title: string }>
+  sheetMeta: Array<{ sheetId: number; title: string; dataRowCount?: number }>
 ): Promise<void> {
   const requests: unknown[] = [];
 
@@ -349,6 +349,154 @@ async function formatSheetHeaders(
           fields: 'userEnteredFormat(backgroundColor,textFormat)',
         },
       });
+
+      // Highlight F2 (Theka Work) and H2 (Net Normal H) in banner
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 2,
+            startColumnIndex: 5,
+            endColumnIndex: 6,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.99, green: 0.95, blue: 0.95 },
+              textFormat: {
+                foregroundColor: { red: 0.72, green: 0.11, blue: 0.11 },
+                bold: true,
+                fontSize: 10,
+              },
+              numberFormat: { type: 'NUMBER', pattern: '0.00' },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,numberFormat)',
+        },
+      });
+
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 2,
+            startColumnIndex: 7,
+            endColumnIndex: 8,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 1, green: 0.97, blue: 0.88 },
+              textFormat: {
+                foregroundColor: { red: 0.71, green: 0.33, blue: 0.04 },
+                bold: true,
+                fontSize: 10,
+              },
+              numberFormat: { type: 'NUMBER', pattern: '0.00' },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,numberFormat)',
+        },
+      });
+
+      if (typeof s.dataRowCount === 'number' && s.dataRowCount > 0) {
+        const bodyStart = 4;
+        const totalRowIdx = 4 + s.dataRowCount;
+        const thekaRowIdx = totalRowIdx + 1;
+        const netPayableRowIdx = totalRowIdx + 2;
+
+        // Reset data area formatting cleanly so updated row counts don't inherit old footer tints
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: netPayableRowIdx + 15,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 1, blue: 1 },
+                textFormat: {
+                  foregroundColor: { red: 0.06, green: 0.09, blue: 0.16 },
+                  bold: false,
+                  fontSize: 10,
+                },
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          },
+        });
+
+        // TOTAL (Before Theka) row
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: totalRowIdx,
+              endRowIndex: totalRowIdx + 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.96, green: 0.97, blue: 0.98 },
+                textFormat: { bold: true, fontSize: 10 },
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          },
+        });
+
+        // Less: Theka Work (H) row
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: thekaRowIdx,
+              endRowIndex: thekaRowIdx + 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 0.96, blue: 0.96 },
+                textFormat: {
+                  foregroundColor: { red: 0.72, green: 0.11, blue: 0.11 },
+                  bold: true,
+                  fontSize: 10,
+                },
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          },
+        });
+
+        // NET PAYABLE (After Theka) row
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: netPayableRowIdx,
+              endRowIndex: netPayableRowIdx + 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 1, green: 0.96, blue: 0.85 },
+                textFormat: {
+                  foregroundColor: { red: 0.57, green: 0.25, blue: 0.05 },
+                  bold: true,
+                  fontSize: 10,
+                },
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          },
+        });
+      }
     }
   }
 
@@ -412,10 +560,21 @@ export async function createMasterSpreadsheet(
     }
   );
 
+  const empRowCountByTab = new Map(
+    employees.map((e) => [
+      getEmployeeSheetTabName(e.empCode, e.name),
+      records.filter((r) => r.empId === e.id || r.empCode === e.empCode).length,
+    ])
+  );
+
   await formatSheetHeaders(
     token,
     created.spreadsheetId,
-    created.sheets.map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }))
+    created.sheets.map((s) => ({
+      sheetId: s.properties.sheetId,
+      title: s.properties.title,
+      dataRowCount: empRowCountByTab.get(s.properties.title),
+    }))
   );
 
   return {
@@ -494,11 +653,21 @@ export async function syncFullWorkbook(
     }
   );
 
-  if (missingTabs.length > 0) {
-    const addedMeta = meta.sheets
-      .filter((s) => missingTabs.includes(s.properties.title))
-      .map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }));
-    await formatSheetHeaders(token, spreadsheetId, addedMeta);
+  const empRowCountByTab = new Map(
+    employees.map((e) => [
+      getEmployeeSheetTabName(e.empCode, e.name),
+      records.filter((r) => r.empId === e.id || r.empCode === e.empCode).length,
+    ])
+  );
+  const allManagedMeta = meta.sheets
+    .filter((s) => requiredTabs.includes(s.properties.title))
+    .map((s) => ({
+      sheetId: s.properties.sheetId,
+      title: s.properties.title,
+      dataRowCount: empRowCountByTab.get(s.properties.title),
+    }));
+  if (allManagedMeta.length > 0) {
+    await formatSheetHeaders(token, spreadsheetId, allManagedMeta);
   }
 
   return {
@@ -541,10 +710,6 @@ export async function syncEmployeeAndMasterTabs(
       }),
     });
     meta = await getSpreadsheetMetadata(token, spreadsheetId);
-    const addedMeta = meta.sheets
-      .filter((s) => missingTabs.includes(s.properties.title))
-      .map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }));
-    await formatSheetHeaders(token, spreadsheetId, addedMeta);
   }
 
   await apiFetch(
@@ -574,6 +739,20 @@ export async function syncEmployeeAndMasterTabs(
     }
   );
 
+  const empRowCount = records.filter(
+    (r) => r.empId === employee.id || r.empCode === employee.empCode
+  ).length;
+  const tabsToFormat = meta.sheets
+    .filter((s) => neededTabs.includes(s.properties.title))
+    .map((s) => ({
+      sheetId: s.properties.sheetId,
+      title: s.properties.title,
+      dataRowCount: s.properties.title === empTab ? empRowCount : undefined,
+    }));
+  if (tabsToFormat.length > 0) {
+    await formatSheetHeaders(token, spreadsheetId, tabsToFormat);
+  }
+
   return {
     spreadsheetId: meta.spreadsheetId,
     spreadsheetTitle: meta.properties.title,
@@ -591,6 +770,16 @@ export async function createOrUpdateStandaloneEmployeeSheet(
 ): Promise<{ spreadsheetId: string; spreadsheetUrl: string }> {
   const tabTitle = 'Attendance';
   const monthTabTitle = monthFilter ? formatMonthLabel(monthFilter) : null;
+  const allEmpRecordsCount = records.filter(
+    (r) => r.empId === employee.id || r.empCode === employee.empCode
+  ).length;
+  const monthEmpRecordsCount = monthFilter
+    ? records.filter(
+        (r) =>
+          (r.empId === employee.id || r.empCode === employee.empCode) &&
+          r.date.startsWith(monthFilter)
+      ).length
+    : 0;
 
   if (employee.individualSheetId) {
     try {
@@ -619,17 +808,18 @@ export async function createOrUpdateStandaloneEmployeeSheet(
           }
         );
         meta = await getSpreadsheetMetadata(token, meta.spreadsheetId);
-        const addedMeta = meta.sheets
-          .filter((s) => s.properties.title === monthTabTitle)
-          .map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }));
-        await formatSheetHeaders(token, meta.spreadsheetId, addedMeta);
       }
 
+      const firstTabIsMonth = Boolean(monthTabTitle && firstTab === monthTabTitle);
       const rangesToClear = [`'${firstTab}'!A1:I5000`];
       const dataUpdates = [
         {
           range: `'${firstTab}'!A1`,
-          values: buildIndividualEmployeeRows(employee, records),
+          values: buildIndividualEmployeeRows(
+            employee,
+            records,
+            firstTabIsMonth ? monthFilter : undefined
+          ),
         },
       ];
 
@@ -660,6 +850,23 @@ export async function createOrUpdateStandaloneEmployeeSheet(
           }),
         }
       );
+
+      const tabsToFormat = meta.sheets
+        .filter(
+          (s) =>
+            s.properties.title === firstTab ||
+            (monthTabTitle && s.properties.title === monthTabTitle)
+        )
+        .map((s) => ({
+          sheetId: s.properties.sheetId,
+          title: s.properties.title,
+          dataRowCount:
+            monthTabTitle && s.properties.title === monthTabTitle
+              ? monthEmpRecordsCount
+              : allEmpRecordsCount,
+        }));
+      await formatSheetHeaders(token, meta.spreadsheetId, tabsToFormat);
+
       return { spreadsheetId: meta.spreadsheetId, spreadsheetUrl: meta.spreadsheetUrl };
     } catch {
       // Fall through and recreate if missing
@@ -711,7 +918,14 @@ export async function createOrUpdateStandaloneEmployeeSheet(
   await formatSheetHeaders(
     token,
     created.spreadsheetId,
-    created.sheets.map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }))
+    created.sheets.map((s) => ({
+      sheetId: s.properties.sheetId,
+      title: s.properties.title,
+      dataRowCount:
+        monthTabTitle && s.properties.title === monthTabTitle
+          ? monthEmpRecordsCount
+          : allEmpRecordsCount,
+    }))
   );
 
   return {

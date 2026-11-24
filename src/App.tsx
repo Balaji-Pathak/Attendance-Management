@@ -385,6 +385,24 @@ export default function App() {
     }
   };
 
+  const ensureGoogleToken = async (): Promise<string | null> => {
+    const existing = getAccessToken();
+    if (existing) return existing;
+    setIsLoggingInGoogle(true);
+    try {
+      const { user: authedUser, accessToken } = await googleSignIn();
+      setGoogleUser(authedUser);
+      setHasGoogleToken(true);
+      await refreshDriveFiles(accessToken);
+      return accessToken;
+    } catch (err) {
+      handleGoogleError(err, 'Google Sheets authorization was cancelled or failed.');
+      return null;
+    } finally {
+      setIsLoggingInGoogle(false);
+    }
+  };
+
   const handleLockAdmin = async () => {
     setIsLockedBySession(true);
     setActiveNav('guard-gate');
@@ -762,9 +780,10 @@ export default function App() {
     });
   };
 
-  const handleRequestSyncEmployeeTab = (employee: Employee) => {
-    const token = getAccessToken();
-    if (!token || !sheetConfig) return;
+  const handleRequestSyncEmployeeTab = async (employee: Employee) => {
+    if (!sheetConfig) return;
+    const token = await ensureGoogleToken();
+    if (!token) return;
     const tabName = getEmployeeSheetTabName(employee.empCode, employee.name);
 
     setConfirmRequest({
@@ -782,43 +801,38 @@ export default function App() {
     });
   };
 
-  const handleRequestStandaloneSheet = (employee: Employee, monthFilter?: string) => {
-    const token = getAccessToken();
-    if (!token) {
-      setActiveNav('sheets-sync');
-      setNotice({
-        type: 'info',
-        message: 'Connect Google Sheets in Google Sheets Sync first.',
-      });
-      return;
-    }
-    const isUpdate = Boolean(employee.individualSheetId);
+  const handleRequestStandaloneSheet = async (employee: Employee, monthFilter?: string) => {
+    const token = await ensureGoogleToken();
+    if (!token) return;
+    const latestEmp = employees.find((e) => e.id === employee.id) ?? employee;
+    const isUpdate = Boolean(latestEmp.individualSheetId);
     const monthLabel = monthFilter ? formatMonthLabel(monthFilter) : null;
 
     setConfirmRequest({
       title: monthLabel
-        ? `${isUpdate ? 'Update' : 'Create'} ${monthLabel} Tab in ${employee.name}'s Google Sheet?`
+        ? `${isUpdate ? 'Update' : 'Create'} ${monthLabel} Tab in ${latestEmp.name}'s Google Sheet?`
         : isUpdate
-        ? `Update ${employee.name}'s Individual Google Sheet?`
-        : `Create Individual Google Sheet for ${employee.name}?`,
+        ? `Update ${latestEmp.name}'s Individual Google Sheet?`
+        : `Create Individual Google Sheet for ${latestEmp.name}?`,
       description: monthLabel
-        ? `Creates or updates the "${monthLabel}" monthly table (Present P, Normal Hours H, Theka deductions) and refreshes the main Attendance tab.`
+        ? `Creates or updates the "${monthLabel}" monthly table (Present P, Theka Work, Net Normal Hours H) and refreshes the main Attendance tab.`
         : isUpdate
-        ? `Update the standalone Google Sheet for ${employee.name} with their attendance records.`
-        : `Create a dedicated standalone Google Sheet file in Google Drive for ${employee.name} (${employee.empCode}).`,
-      affectedTarget: `${employee.empCode} - ${employee.name} Attendance${monthLabel ? ` · ${monthLabel}` : ''}`,
+        ? `Update the standalone Google Sheet for ${latestEmp.name} with their attendance records and Theka deductions.`
+        : `Create a dedicated standalone Google Sheet file in Google Drive for ${latestEmp.name} (${latestEmp.empCode}).`,
+      affectedTarget: `${latestEmp.empCode} - ${latestEmp.name} Attendance${monthLabel ? ` · ${monthLabel}` : ''}`,
       confirmLabel: isUpdate ? 'Update Sheet' : 'Create Sheet',
       onConfirm: async () => {
         setIsSyncing(true);
         try {
+          const freshEmp = employees.find((e) => e.id === latestEmp.id) ?? latestEmp;
           const res = await createOrUpdateStandaloneEmployeeSheet(
             token,
-            employee,
+            freshEmp,
             records,
             monthFilter
           );
           const updatedEmp: Employee = {
-            ...employee,
+            ...freshEmp,
             individualSheetId: res.spreadsheetId,
             individualSheetUrl: res.spreadsheetUrl,
           };
@@ -830,7 +844,7 @@ export default function App() {
             getAllAdminEmails()
           );
           const nextEmps = employees.map((e) =>
-            e.id === employee.id ? updatedEmp : e
+            e.id === updatedEmp.id ? updatedEmp : e
           );
           if (sheetConfig) {
             await syncOneEmployeeAndMaster(updatedEmp, nextEmps, records);
@@ -839,8 +853,8 @@ export default function App() {
           setNotice({
             type: 'success',
             message: monthLabel
-              ? `Updated "${monthLabel}" in ${employee.name}'s Google Sheet and shared with all company admins.`
-              : `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${employee.name} and shared with all company admins.`,
+              ? `Updated "${monthLabel}" in ${updatedEmp.name}'s Google Sheet and shared with all company admins.`
+              : `${isUpdate ? 'Updated' : 'Created'} individual Google Sheet for ${updatedEmp.name} and shared with all company admins.`,
           });
         } catch (err) {
           handleGoogleError(err, 'Could not create or update individual Google Sheet.');
@@ -866,15 +880,8 @@ export default function App() {
   );
 
   const handleImportEmployeeSheet = async (employee: Employee, sheetUrlOrId: string) => {
-    const token = getAccessToken();
-    if (!token) {
-      setActiveNav('sheets-sync');
-      setNotice({
-        type: 'info',
-        message: 'Connect Google Sheets in Google Sheets Sync first.',
-      });
-      return;
-    }
+    const token = await ensureGoogleToken();
+    if (!token) return;
 
     setIsSyncing(true);
     try {
@@ -931,7 +938,7 @@ export default function App() {
       const nextRecords = mergeRecordsList(records, monthRecords);
       setRecords(nextRecords);
 
-      const token = getAccessToken();
+      const token = syncToStandaloneSheet ? await ensureGoogleToken() : getAccessToken();
       let updatedEmp = employee;
 
       if (syncToStandaloneSheet && token) {
@@ -1023,7 +1030,7 @@ export default function App() {
     employee: Employee,
     yearMonth: string,
     thikadaMinutes: number
-  ) => {
+  ): Promise<{ sheetUpdated: boolean }> => {
     const nextMap: Record<string, number> = {
       ...(employee.monthlyThikadaMinutes ?? {}),
     };
@@ -1033,17 +1040,62 @@ export default function App() {
       delete nextMap[yearMonth];
     }
 
-    const updatedEmp: Employee = {
+    let updatedEmp: Employee = {
       ...employee,
       monthlyThikadaMinutes: Object.keys(nextMap).length > 0 ? nextMap : undefined,
     };
 
     await adminSaveEmployee(updatedEmp);
     upsertLocalEmployee(updatedEmp);
+
+    const token = getAccessToken();
+    let sheetUpdated = false;
+
+    if (token && (updatedEmp.individualSheetId || sheetConfig)) {
+      setIsSyncing(true);
+      try {
+        if (updatedEmp.individualSheetId) {
+          const res = await createOrUpdateStandaloneEmployeeSheet(
+            token,
+            updatedEmp,
+            records,
+            yearMonth
+          );
+          updatedEmp = {
+            ...updatedEmp,
+            individualSheetId: res.spreadsheetId,
+            individualSheetUrl: res.spreadsheetUrl,
+          };
+          await adminSaveEmployee(updatedEmp);
+          upsertLocalEmployee(updatedEmp);
+          await shareSheetsWithEmails(token, [res.spreadsheetId], getAllAdminEmails());
+          sheetUpdated = true;
+        }
+        if (sheetConfig) {
+          const nextEmps = employees.map((e) => (e.id === updatedEmp.id ? updatedEmp : e));
+          await syncOneEmployeeAndMaster(updatedEmp, nextEmps, records);
+          sheetUpdated = true;
+        }
+        await refreshDriveFiles(token);
+      } catch (err) {
+        handleGoogleError(
+          err,
+          'Applied Theka deduction in GateLog, but Google Sheet update failed.'
+        );
+        return { sheetUpdated: false };
+      } finally {
+        setIsSyncing(false);
+      }
+    }
+
     setNotice({
       type: 'success',
-      message: `Applied ${(thikadaMinutes / 60).toFixed(2)}h Theka deduction for ${formatMonthLabel(yearMonth)}.`,
+      message: sheetUpdated
+        ? `Applied ${(thikadaMinutes / 60).toFixed(2)}h Theka work deduction for ${formatMonthLabel(yearMonth)} and updated Google Sheets.`
+        : `Applied ${(thikadaMinutes / 60).toFixed(2)}h Theka work deduction for ${formatMonthLabel(yearMonth)}.`,
     });
+
+    return { sheetUpdated };
   };
 
   const handlePullFromSheet = () => {
@@ -1216,7 +1268,7 @@ export default function App() {
           <div className="font-medium text-slate-700">
             {isAdminUnlocked ? 'Admin Mode Active' : 'Guard Mode (Open)'}
           </div>
-          <div>30 min break deducted on Mark Out</div>
+          <div>30m break deducted for 4.5h+ shifts</div>
         </div>
       </aside>
 
@@ -1403,6 +1455,7 @@ export default function App() {
               records={records}
               sheetConfig={sheetConfig}
               isGoogleAuthed={hasGoogleToken}
+              isSyncing={isSyncing}
               onRequestSyncEmployeeTab={handleRequestSyncEmployeeTab}
               onRequestStandaloneSheet={handleRequestStandaloneSheet}
               onImportEmployeeSheet={handleImportEmployeeSheet}
