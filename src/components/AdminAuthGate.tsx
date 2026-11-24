@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
-import { Lock, ShieldCheck } from 'lucide-react';
+import { Lock, RefreshCw, ShieldCheck } from 'lucide-react';
 import { AdminAuthStatus } from '../types/attendance';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface AdminAuthGateProps {
   authStatus: AdminAuthStatus;
+  authStatusLoading: boolean;
+  authStatusError: string | null;
+  onRetryAuthStatus: () => void;
   isSigningInGoogle: boolean;
   onPasswordLogin: (password: string) => Promise<void>;
   onSetupPassword: (password: string) => Promise<void>;
@@ -14,6 +17,9 @@ interface AdminAuthGateProps {
 
 export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
   authStatus,
+  authStatusLoading,
+  authStatusError,
+  onRetryAuthStatus,
   isSigningInGoogle,
   onPasswordLogin,
   onSetupPassword,
@@ -64,6 +70,49 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
     }
   };
 
+  if (authStatusLoading) {
+    return (
+      <div className="mx-auto max-w-md py-8">
+        <div className="rounded-xl border border-slate-200 bg-white p-8 text-center space-y-3">
+          <RefreshCw className="mx-auto h-5 w-5 animate-spin text-slate-500" />
+          <p className="text-sm font-medium text-slate-700">
+            Checking Admin authentication status...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authStatusError) {
+    return (
+      <div className="mx-auto max-w-md py-8">
+        <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8 space-y-4">
+          <h2 className="text-base font-bold text-slate-900">
+            Unable to Reach GateLog Server
+          </h2>
+          <p className="text-xs leading-relaxed text-red-700">{authStatusError}</p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onRetryAuthStatus}
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Retry</span>
+            </button>
+            <button
+              type="button"
+              onClick={onBackToGuard}
+              className="text-xs font-medium text-slate-600 hover:text-slate-900"
+            >
+              Back to Guard Gate Desk
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-md py-8">
       <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8 space-y-6">
@@ -78,6 +127,8 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
             <p className="mt-1 text-xs leading-relaxed text-slate-500">
               {needsFirstRunSetup
                 ? 'Guard Gate Desk stays open for attendance marking. Create an Admin password to protect employee records and Google Sheets controls.'
+                : authStatus.hasEnvPasscode
+                ? 'Enter the configured Admin passcode (from Secrets) or sign in with your authorized Google account.'
                 : 'This section is restricted to Admin. Unlock with your Admin password or authorized Google account.'}
             </p>
           </div>

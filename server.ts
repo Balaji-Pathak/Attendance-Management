@@ -2,7 +2,8 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import express, { NextFunction, Request, Response } from 'express';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -704,6 +705,11 @@ async function startServer() {
     if (sheetConfig) store.sheetConfig = sheetConfig;
     writeStore(store);
     res.json({ ok: true });
+  });
+
+  // Ensure unknown /api/* routes always return JSON instead of HTML fallback
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
   });
 
   // ============================================================================

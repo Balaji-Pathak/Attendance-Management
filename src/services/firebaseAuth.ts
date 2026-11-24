@@ -62,6 +62,15 @@ export const googleSignIn = async (): Promise<{
     const idToken = await result.user.getIdToken();
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken, idToken };
+  } catch (err: unknown) {
+    const fbErr = err as { code?: string; message?: string };
+    if (fbErr?.code === 'auth/unauthorized-domain') {
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
+      throw new Error(
+        `Google Sign-In is not authorized for "${host}". Open the app from your AI Studio preview URL or add "${host}" in Firebase Auth Authorized Domains. You can also unlock with your Admin Password.`
+      );
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }

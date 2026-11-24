@@ -72,6 +72,20 @@ const NAV_ITEMS: Array<{
   { id: 'sheets-sync', label: 'Google Sheets Sync', adminOnly: true, icon: FileSpreadsheet },
 ];
 
+async function parseApiJson<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from server (HTTP ${res.status}).`);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `Server returned an unexpected response (HTTP ${res.status}). Please refresh and try again.`
+    );
+  }
+}
+
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavSection>('guard-gate');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -83,6 +97,8 @@ export default function App() {
     isAdminClaimed: false,
     adminEmail: null,
   });
+  const [authStatusLoading, setAuthStatusLoading] = useState<boolean>(true);
+  const [authStatusError, setAuthStatusError] = useState<string | null>(null);
 
   // Google Workspace OAuth state (token strictly in memory in firebaseAuth.ts)
   const [googleUser, setGoogleUser] = useState<User | null>(null);
@@ -111,27 +127,37 @@ export default function App() {
     try {
       const res = await fetch(`/api/gate/status?tz=${encodeURIComponent(browserTz)}`);
       if (!res.ok) return;
-      const data = (await res.json()) as {
+      const data = await parseApiJson<{
         serverDate: string;
         employees: GateEmployeeView[];
         todayRecords: AttendanceRecord[];
-      };
+      }>(res);
       setServerDate(data.serverDate);
       setGateEmployees(data.employees);
       setTodayRecords(data.todayRecords);
     } catch {
-      // Ignore transient network errors on background poll
+      // Ignore transient errors on background poll
     }
   }, [browserTz]);
 
-  const fetchAdminAuthStatus = useCallback(async () => {
+  const fetchAdminAuthStatus = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setAuthStatusLoading(true);
+    setAuthStatusError(null);
     try {
       const res = await fetch('/api/admin/auth-status');
-      if (!res.ok) return;
-      const data = (await res.json()) as AdminAuthStatus;
-      setAdminAuthStatus(data);
-    } catch {
-      // Ignore transient errors
+      const data = await parseApiJson<AdminAuthStatus & { error?: string }>(res);
+      if (!res.ok) {
+        throw new Error(data.error || `Server error (HTTP ${res.status})`);
+      }
+      setAdminAuthStatus({
+        hasEnvPasscode: Boolean(data.hasEnvPasscode),
+        isAdminClaimed: Boolean(data.isAdminClaimed),
+        adminEmail: data.adminEmail ?? null,
+      });
+    } catch (err) {
+      setAuthStatusError((err as Error).message || 'Could not reach server.');
+    } finally {
+      setAuthStatusLoading(false);
     }
   }, []);
 
@@ -139,30 +165,34 @@ export default function App() {
     async (tokenOverride?: string) => {
       const token = tokenOverride ?? adminToken;
       if (!token) return;
-      const res = await fetch('/api/admin/state', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) {
-        setAdminToken(null);
-        return;
+      try {
+        const res = await fetch('/api/admin/state', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 401) {
+          setAdminToken(null);
+          return;
+        }
+        if (!res.ok) return;
+        const data = await parseApiJson<{
+          employees: Employee[];
+          records: AttendanceRecord[];
+          sheetConfig: SheetConfig | null;
+        }>(res);
+        setEmployees(data.employees);
+        setRecords(sortRecordsNewestFirst(data.records));
+        setSheetConfig(data.sheetConfig);
+      } catch {
+        // Ignore transient network errors on background poll
       }
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        employees: Employee[];
-        records: AttendanceRecord[];
-        sheetConfig: SheetConfig | null;
-      };
-      setEmployees(data.employees);
-      setRecords(sortRecordsNewestFirst(data.records));
-      setSheetConfig(data.sheetConfig);
     },
     [adminToken]
   );
 
-  // Initial load + 15s sync poll so Guard sees new employees and Admin sees live guard marks
+  // Initial load + 15s sync poll
   useEffect(() => {
     fetchGateStatus();
-    fetchAdminAuthStatus();
+    fetchAdminAuthStatus(true);
     const interval = setInterval(() => {
       fetchGateStatus();
       if (adminToken) {
@@ -171,6 +201,14 @@ export default function App() {
     }, 15000);
     return () => clearInterval(interval);
   }, [fetchGateStatus, fetchAdminAuthStatus, fetchAdminState, adminToken]);
+
+  // Refresh auth-status when navigating to a locked Admin tab
+  useEffect(() => {
+    const item = NAV_ITEMS.find((n) => n.id === activeNav);
+    if (item?.adminOnly && !adminToken) {
+      fetchAdminAuthStatus(false);
+    }
+  }, [activeNav, adminToken, fetchAdminAuthStatus]);
 
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -229,7 +267,7 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ empId, tz: browserTz }),
     });
-    const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+    const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
     if (!res.ok) {
       setNotice({ type: 'error', message: body.error || 'Could not mark check-in.' });
       return;
@@ -248,7 +286,7 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recordId, tz: browserTz }),
     });
-    const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+    const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
     if (!res.ok) {
       setNotice({ type: 'error', message: body.error || 'Could not mark check-out.' });
       return;
@@ -270,12 +308,13 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password }),
     });
-    const body = (await res.json()) as { token?: string; error?: string };
+    const body = await parseApiJson<{ token?: string; error?: string }>(res);
     if (!res.ok || !body.token) {
+      await fetchAdminAuthStatus(false);
       throw new Error(body.error || 'Could not set Admin password.');
     }
     setAdminToken(body.token);
-    await fetchAdminAuthStatus();
+    await fetchAdminAuthStatus(false);
     await fetchAdminState(body.token);
     setNotice({
       type: 'success',
@@ -289,7 +328,7 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password }),
     });
-    const body = (await res.json()) as { token?: string; error?: string };
+    const body = await parseApiJson<{ token?: string; error?: string }>(res);
     if (!res.ok || !body.token) {
       throw new Error(body.error || 'Incorrect Admin password.');
     }
@@ -314,7 +353,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
       });
-      const body = (await res.json()) as { token?: string; error?: string };
+      const body = await parseApiJson<{ token?: string; error?: string }>(res);
       if (!res.ok || !body.token) {
         setNotice({
           type: 'error',
@@ -324,7 +363,7 @@ export default function App() {
       }
 
       setAdminToken(body.token);
-      await fetchAdminAuthStatus();
+      await fetchAdminAuthStatus(false);
       await fetchAdminState(body.token);
       await refreshDriveFiles(accessToken);
       setNotice({
@@ -383,12 +422,12 @@ export default function App() {
       },
       body: JSON.stringify({ newPassword }),
     });
-    const body = (await res.json()) as { error?: string };
+    const body = await parseApiJson<{ error?: string }>(res);
     if (!res.ok) {
       setNotice({ type: 'error', message: body.error || 'Failed to update password.' });
       return;
     }
-    await fetchAdminAuthStatus();
+    await fetchAdminAuthStatus(false);
     setNotice({ type: 'success', message: 'Admin password updated.' });
   };
 
@@ -448,7 +487,7 @@ export default function App() {
         },
         body: JSON.stringify(emp),
       });
-      const body = (await res.json()) as { employees?: Employee[]; error?: string };
+      const body = await parseApiJson<{ employees?: Employee[]; error?: string }>(res);
       if (!res.ok || !body.employees) {
         throw new Error(body.error || 'Failed to save employee.');
       }
@@ -497,7 +536,7 @@ export default function App() {
       method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}` },
     });
-    const body = (await res.json()) as { employees?: Employee[] };
+    const body = await parseApiJson<{ employees?: Employee[]; error?: string }>(res);
     if (res.ok && body.employees) {
       setEmployees(body.employees);
       await fetchGateStatus();
@@ -525,7 +564,7 @@ export default function App() {
           breakMinutes: updated.breakMinutes,
         }),
       });
-      const body = (await res.json()) as { record?: AttendanceRecord; error?: string };
+      const body = await parseApiJson<{ record?: AttendanceRecord; error?: string }>(res);
       if (!res.ok || !body.record) {
         throw new Error(body.error || 'Failed to update record.');
       }
@@ -784,7 +823,7 @@ export default function App() {
             },
             body: JSON.stringify(updatedEmp),
           });
-          const body = (await saveRes.json()) as { employees?: Employee[] };
+          const body = await parseApiJson<{ employees?: Employee[] }>(saveRes);
           const nextEmps =
             body.employees ??
             employees.map((e) => (e.id === employee.id ? updatedEmp : e));
@@ -1034,6 +1073,9 @@ export default function App() {
           {requiresAdminGate && (
             <AdminAuthGate
               authStatus={adminAuthStatus}
+              authStatusLoading={authStatusLoading}
+              authStatusError={authStatusError}
+              onRetryAuthStatus={() => fetchAdminAuthStatus(true)}
               isSigningInGoogle={isLoggingInGoogle}
               onPasswordLogin={handlePasswordLogin}
               onSetupPassword={handleSetupPassword}
