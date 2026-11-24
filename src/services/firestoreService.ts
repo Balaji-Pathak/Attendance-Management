@@ -19,9 +19,11 @@ import {
 } from '../types/attendance';
 import {
   buildStarterEmployees,
+  calculateMetricsFromWorkedMinutes,
   calculateShiftMetrics,
   getCurrentHHMM,
   getTodayISO,
+  isSundayISO,
   sortRecordsNewestFirst,
 } from '../utils/time';
 import { db, handleFirestoreError, OperationType } from './firebaseClient';
@@ -60,18 +62,46 @@ function docToAttendanceRecord(id: string, data: Record<string, unknown>): Atten
       ? updatedAtRaw
       : new Date().toISOString();
 
+  const date = String(data.date ?? '');
+  const netMinutes = typeof data.netMinutes === 'number' ? data.netMinutes : null;
+  const isSunday =
+    typeof data.isSunday === 'boolean' ? data.isSunday : date ? isSundayISO(date) : false;
+
+  const fallbackOtMins =
+    netMinutes !== null
+      ? isSunday
+        ? netMinutes
+        : Math.max(0, netMinutes - 480)
+      : null;
+  const overtimeMinutes =
+    typeof data.overtimeMinutes === 'number' ? data.overtimeMinutes : fallbackOtMins;
+  const overtimeDecimalHours =
+    typeof data.overtimeDecimalHours === 'number'
+      ? data.overtimeDecimalHours
+      : overtimeMinutes !== null
+      ? Number((overtimeMinutes / 60).toFixed(2))
+      : null;
+
   return {
     id,
-    date: String(data.date ?? ''),
+    date,
     empId: String(data.empId ?? ''),
     empCode: String(data.empCode ?? ''),
     empName: String(data.empName ?? ''),
     inTime: String(data.inTime ?? '09:00'),
     outTime: data.outTime ? String(data.outTime) : null,
+    startedAtMs: typeof data.startedAtMs === 'number' ? data.startedAtMs : null,
+    isPaused: Boolean(data.isPaused),
+    pausedAtMs: typeof data.pausedAtMs === 'number' ? data.pausedAtMs : null,
+    pausedTotalSeconds:
+      typeof data.pausedTotalSeconds === 'number' ? data.pausedTotalSeconds : 0,
     grossMinutes: typeof data.grossMinutes === 'number' ? data.grossMinutes : null,
     breakMinutes: typeof data.breakMinutes === 'number' ? data.breakMinutes : 30,
-    netMinutes: typeof data.netMinutes === 'number' ? data.netMinutes : null,
+    netMinutes,
     netDecimalHours: typeof data.netDecimalHours === 'number' ? data.netDecimalHours : null,
+    overtimeMinutes,
+    overtimeDecimalHours,
+    isSunday,
     status: (data.status as AttendanceRecord['status']) || 'on_duty',
     syncedToSheet: Boolean(data.syncedToSheet),
     updatedAt,
@@ -139,6 +169,8 @@ export function subscribeTodayAttendance(
 export async function guardMarkIn(employee: GateEmployeeView): Promise<AttendanceRecord> {
   const date = getTodayISO();
   const inTime = getCurrentHHMM();
+  const nowMs = Date.now();
+  const isSunday = isSundayISO(date);
   const docId = `${date}_${employee.id}`;
   const path = `${ATTENDANCE_COL}/${docId}`;
 
@@ -150,10 +182,17 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
     empName: employee.name.slice(0, 80),
     inTime,
     outTime: null,
+    startedAtMs: nowMs,
+    isPaused: false,
+    pausedAtMs: null,
+    pausedTotalSeconds: 0,
     grossMinutes: null,
     breakMinutes: 30,
     netMinutes: null,
     netDecimalHours: null,
+    overtimeMinutes: null,
+    overtimeDecimalHours: null,
+    isSunday,
     status: 'on_duty' as const,
     syncedToSheet: false,
     createdAt: serverTimestamp(),
@@ -170,10 +209,17 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
       empName: employee.name,
       inTime,
       outTime: null,
+      startedAtMs: nowMs,
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: 0,
       grossMinutes: null,
       breakMinutes: 30,
       netMinutes: null,
       netDecimalHours: null,
+      overtimeMinutes: null,
+      overtimeDecimalHours: null,
+      isSunday,
       status: 'on_duty',
       syncedToSheet: false,
       updatedAt: new Date().toISOString(),
@@ -183,17 +229,112 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
   }
 }
 
-export async function guardMarkOut(record: AttendanceRecord): Promise<AttendanceRecord> {
-  const outTime = getCurrentHHMM();
-  const calc = calculateShiftMetrics(record.inTime, outTime, record.breakMinutes ?? 30);
+export async function guardPauseTiming(record: AttendanceRecord): Promise<AttendanceRecord> {
+  const nowMs = Date.now();
   const path = `${ATTENDANCE_COL}/${record.id}`;
+  const isSunday = record.isSunday ?? isSundayISO(record.date);
+  const pausedTotalSeconds = Math.max(0, Math.round(record.pausedTotalSeconds ?? 0));
+
+  try {
+    await updateDoc(doc(db, ATTENDANCE_COL, record.id), {
+      isPaused: true,
+      pausedAtMs: nowMs,
+      pausedTotalSeconds,
+      isSunday,
+      overtimeMinutes: record.overtimeMinutes ?? null,
+      overtimeDecimalHours: record.overtimeDecimalHours ?? null,
+      updatedAt: serverTimestamp(),
+    });
+
+    return {
+      ...record,
+      isPaused: true,
+      pausedAtMs: nowMs,
+      pausedTotalSeconds,
+      isSunday,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function guardResumeTiming(record: AttendanceRecord): Promise<AttendanceRecord> {
+  const nowMs = Date.now();
+  const path = `${ATTENDANCE_COL}/${record.id}`;
+  const isSunday = record.isSunday ?? isSundayISO(record.date);
+  const pauseStarted = record.pausedAtMs ?? nowMs;
+  const pauseDeltaSec = Math.max(0, Math.floor((nowMs - pauseStarted) / 1000));
+  const nextPausedTotalSeconds = Math.min(
+    86400,
+    Math.max(0, Math.round(record.pausedTotalSeconds ?? 0)) + pauseDeltaSec
+  );
+
+  try {
+    await updateDoc(doc(db, ATTENDANCE_COL, record.id), {
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: nextPausedTotalSeconds,
+      isSunday,
+      overtimeMinutes: record.overtimeMinutes ?? null,
+      overtimeDecimalHours: record.overtimeDecimalHours ?? null,
+      updatedAt: serverTimestamp(),
+    });
+
+    return {
+      ...record,
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: nextPausedTotalSeconds,
+      isSunday,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function guardMarkOut(record: AttendanceRecord): Promise<AttendanceRecord> {
+  const nowMs = Date.now();
+  const outTime = getCurrentHHMM();
+  const path = `${ATTENDANCE_COL}/${record.id}`;
+
+  const extraPauseSec =
+    record.isPaused && record.pausedAtMs
+      ? Math.max(0, Math.floor((nowMs - record.pausedAtMs) / 1000))
+      : 0;
+  const finalPausedSeconds = Math.min(
+    86400,
+    Math.max(0, Math.round(record.pausedTotalSeconds ?? 0)) + extraPauseSec
+  );
+
+  const calc =
+    typeof record.startedAtMs === 'number' && record.startedAtMs > 0
+      ? calculateMetricsFromWorkedMinutes(
+          Math.max(0, Math.round((Math.floor((nowMs - record.startedAtMs) / 1000) - finalPausedSeconds) / 60)),
+          record.breakMinutes ?? 30,
+          record.date
+        )
+      : calculateShiftMetrics(
+          record.inTime,
+          outTime,
+          record.breakMinutes ?? 30,
+          record.date,
+          Math.round(finalPausedSeconds / 60)
+        );
 
   try {
     await updateDoc(doc(db, ATTENDANCE_COL, record.id), {
       outTime,
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: finalPausedSeconds,
       grossMinutes: calc.grossMinutes,
       netMinutes: calc.netMinutes,
       netDecimalHours: calc.netDecimalHours,
+      overtimeMinutes: calc.overtimeMinutes,
+      overtimeDecimalHours: calc.overtimeDecimalHours,
+      isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
       updatedAt: serverTimestamp(),
@@ -202,9 +343,15 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
     return {
       ...record,
       outTime,
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: finalPausedSeconds,
       grossMinutes: calc.grossMinutes,
       netMinutes: calc.netMinutes,
       netDecimalHours: calc.netDecimalHours,
+      overtimeMinutes: calc.overtimeMinutes,
+      overtimeDecimalHours: calc.overtimeDecimalHours,
+      isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
       updatedAt: new Date().toISOString(),
@@ -333,18 +480,32 @@ export async function adminLoadStarterEmployees(): Promise<void> {
 
 export async function adminUpdateAttendance(record: AttendanceRecord): Promise<void> {
   const path = `${ATTENDANCE_COL}/${record.id}`;
+  const isSunday = isSundayISO(record.date);
+  const pausedSeconds = Math.max(0, Math.round(record.pausedTotalSeconds ?? 0));
   let updateFields: Record<string, unknown>;
 
   if (record.outTime) {
-    const calc = calculateShiftMetrics(record.inTime, record.outTime, record.breakMinutes);
+    const calc = calculateShiftMetrics(
+      record.inTime,
+      record.outTime,
+      record.breakMinutes,
+      record.date,
+      Math.round(pausedSeconds / 60)
+    );
     updateFields = {
       date: record.date,
       inTime: record.inTime,
       outTime: record.outTime,
+      isPaused: false,
+      pausedAtMs: null,
+      pausedTotalSeconds: pausedSeconds,
       grossMinutes: calc.grossMinutes,
       breakMinutes: calc.breakDeductedMinutes,
       netMinutes: calc.netMinutes,
       netDecimalHours: calc.netDecimalHours,
+      overtimeMinutes: calc.overtimeMinutes,
+      overtimeDecimalHours: calc.overtimeDecimalHours,
+      isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
       updatedAt: serverTimestamp(),
@@ -354,10 +515,16 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
       date: record.date,
       inTime: record.inTime,
       outTime: null,
+      isPaused: Boolean(record.isPaused),
+      pausedAtMs: record.pausedAtMs ?? null,
+      pausedTotalSeconds: pausedSeconds,
       grossMinutes: null,
       breakMinutes: record.breakMinutes,
       netMinutes: null,
       netDecimalHours: null,
+      overtimeMinutes: null,
+      overtimeDecimalHours: null,
+      isSunday,
       status: 'on_duty',
       syncedToSheet: false,
       updatedAt: serverTimestamp(),
@@ -368,6 +535,52 @@ export async function adminUpdateAttendance(record: AttendanceRecord): Promise<v
     await updateDoc(doc(db, ATTENDANCE_COL, record.id), updateFields);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function adminSaveBulkAttendance(
+  records: AttendanceRecord[],
+  syncedToSheet = false
+): Promise<void> {
+  if (records.length === 0) return;
+
+  for (let i = 0; i < records.length; i += 450) {
+    const batch = writeBatch(db);
+    for (const r of records.slice(i, i + 450)) {
+      const docId = `${r.date}_${r.empId}`.replace(/[^a-zA-Z0-9_-]/g, '');
+      const isSunday = r.isSunday ?? isSundayISO(r.date);
+      const pausedSeconds = Math.max(0, Math.round(r.pausedTotalSeconds ?? 0));
+
+      batch.set(doc(db, ATTENDANCE_COL, docId), {
+        id: docId,
+        date: r.date,
+        empId: r.empId,
+        empCode: r.empCode.slice(0, 30),
+        empName: r.empName.slice(0, 80),
+        inTime: r.inTime,
+        outTime: r.outTime,
+        startedAtMs: null,
+        isPaused: false,
+        pausedAtMs: null,
+        pausedTotalSeconds: pausedSeconds,
+        grossMinutes: r.grossMinutes,
+        breakMinutes: r.breakMinutes,
+        netMinutes: r.netMinutes,
+        netDecimalHours: r.netDecimalHours,
+        overtimeMinutes: r.overtimeMinutes ?? null,
+        overtimeDecimalHours: r.overtimeDecimalHours ?? null,
+        isSunday,
+        status: r.status,
+        syncedToSheet,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, ATTENDANCE_COL);
+    }
   }
 }
 
@@ -444,6 +657,7 @@ export async function adminImportFromSheet(
       const batch = writeBatch(db);
       for (const r of records.slice(i, i + 450)) {
         const docId = `${r.date}_${r.empId}`.replace(/[^a-zA-Z0-9_-]/g, '');
+        const isSunday = r.isSunday ?? isSundayISO(r.date);
         batch.set(doc(db, ATTENDANCE_COL, docId), {
           id: docId,
           date: r.date,
@@ -452,10 +666,17 @@ export async function adminImportFromSheet(
           empName: r.empName.slice(0, 80),
           inTime: r.inTime,
           outTime: r.outTime,
+          startedAtMs: null,
+          isPaused: false,
+          pausedAtMs: null,
+          pausedTotalSeconds: Math.max(0, Math.round(r.pausedTotalSeconds ?? 0)),
           grossMinutes: r.grossMinutes,
           breakMinutes: r.breakMinutes,
           netMinutes: r.netMinutes,
           netDecimalHours: r.netDecimalHours,
+          overtimeMinutes: r.overtimeMinutes ?? null,
+          overtimeDecimalHours: r.overtimeDecimalHours ?? null,
+          isSunday,
           status: r.status,
           syncedToSheet: true,
           createdAt: serverTimestamp(),

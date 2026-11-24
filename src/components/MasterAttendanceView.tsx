@@ -7,6 +7,8 @@ import {
   formatDisplayDate,
   formatDisplayTime,
   formatDurationHM,
+  getDayNameShort,
+  isSundayISO,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -56,6 +58,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   const totals = useMemo(() => {
     let totalBreak = 0;
     let totalNet = 0;
+    let totalOvertime = 0;
     let pendingSync = 0;
 
     for (const r of filteredRecords) {
@@ -63,6 +66,14 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       if (r.outTime && r.netMinutes !== null) {
         totalBreak += r.breakMinutes;
         totalNet += r.netMinutes;
+        const isSun = r.isSunday ?? isSundayISO(r.date);
+        const ot =
+          typeof r.overtimeMinutes === 'number'
+            ? r.overtimeMinutes
+            : isSun
+            ? r.netMinutes
+            : Math.max(0, r.netMinutes - 480);
+        totalOvertime += ot;
       }
     }
 
@@ -71,6 +82,8 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       totalBreak,
       totalNet,
       totalNetDecimal: Number((totalNet / 60).toFixed(2)),
+      totalOvertime,
+      totalOvertimeDecimal: Number((totalOvertime / 60).toFixed(2)),
       pendingSync,
     };
   }, [filteredRecords]);
@@ -78,15 +91,37 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   const handleExportCSV = () => {
     downloadCSV(
       `master-attendance${dateFilter ? `-${dateFilter}` : ''}.csv`,
-      ['Date', 'Employee ID', 'Name', 'In Time', 'Out Time', 'Working Hours'],
-      filteredRecords.map((r) => [
-        r.date,
-        r.empCode,
-        r.empName,
-        formatDisplayTime(r.inTime),
-        r.outTime ? formatDisplayTime(r.outTime) : '',
-        r.netDecimalHours !== null ? r.netDecimalHours : '',
-      ])
+      [
+        'Date',
+        'Day',
+        'Employee ID',
+        'Name',
+        'In Time',
+        'Out Time',
+        'Away (mins)',
+        'Working Hours',
+        'Overtime Hours',
+      ],
+      filteredRecords.map((r) => {
+        const isSun = r.isSunday ?? isSundayISO(r.date);
+        const otDec =
+          typeof r.overtimeDecimalHours === 'number'
+            ? r.overtimeDecimalHours
+            : r.netMinutes !== null
+            ? Number(((isSun ? r.netMinutes : Math.max(0, r.netMinutes - 480)) / 60).toFixed(2))
+            : '';
+        return [
+          r.date,
+          getDayNameShort(r.date),
+          r.empCode,
+          r.empName,
+          formatDisplayTime(r.inTime),
+          r.outTime ? formatDisplayTime(r.outTime) : '',
+          Math.round((r.pausedTotalSeconds ?? 0) / 60),
+          r.netDecimalHours !== null ? r.netDecimalHours : '',
+          otDec,
+        ];
+      })
     );
   };
 
@@ -104,7 +139,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
 
   const editPreview = useMemo(() => {
     if (!editing || !editing.outTime) return null;
-    return calculateShiftMetrics(editing.inTime, editing.outTime, editing.breakMinutes);
+    return calculateShiftMetrics(
+      editing.inTime,
+      editing.outTime,
+      editing.breakMinutes,
+      editing.date,
+      Math.round((editing.pausedTotalSeconds ?? 0) / 60)
+    );
   }, [editing]);
 
   return (
@@ -118,15 +159,15 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-          <div className="text-xs font-medium text-slate-500">Break Deducted</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
-            {formatDurationHM(totals.totalBreak)}
-          </div>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
           <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
             {totals.totalNetDecimal.toFixed(2)}h
+          </div>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+          <div className="text-xs font-medium text-slate-500">Total Overtime Hours</div>
+          <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
+            {totals.totalOvertimeDecimal.toFixed(2)}h
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
@@ -238,59 +279,99 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-4 py-3 whitespace-nowrap">Name</th>
                   <th className="px-4 py-3 whitespace-nowrap">In Time</th>
                   <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours (-30m)</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Working (-30m)</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Overtime</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-right whitespace-nowrap">Admin</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredRecords.map((rec) => (
-                  <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="px-6 py-3.5 font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
-                      {rec.date}
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs font-medium text-slate-700 tabular-nums whitespace-nowrap">
-                      {rec.empCode}
-                    </td>
-                    <td className="px-4 py-3.5 font-medium text-slate-900 whitespace-nowrap">
-                      {rec.empName}
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
-                      {formatDisplayTime(rec.inTime)}
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
-                      {rec.outTime ? formatDisplayTime(rec.outTime) : '—'}
-                    </td>
-                    <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap">
-                      {rec.netMinutes !== null
-                        ? `${formatDurationHM(rec.netMinutes)} · ${rec.netDecimalHours?.toFixed(2)}h`
-                        : '—'}
-                    </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      <StatusLabel status={rec.status} />
-                    </td>
-                    <td className="px-6 py-3.5 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setEditing({ ...rec })}
-                          className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                          aria-label={`Edit attendance for ${rec.empName}`}
+                {filteredRecords.map((rec) => {
+                  const isSun = rec.isSunday ?? isSundayISO(rec.date);
+                  const awayMins = Math.round((rec.pausedTotalSeconds ?? 0) / 60);
+                  const otMins =
+                    rec.netMinutes !== null
+                      ? typeof rec.overtimeMinutes === 'number'
+                        ? rec.overtimeMinutes
+                        : isSun
+                        ? rec.netMinutes
+                        : Math.max(0, rec.netMinutes - 480)
+                      : null;
+                  const otDec =
+                    otMins !== null
+                      ? typeof rec.overtimeDecimalHours === 'number'
+                        ? rec.overtimeDecimalHours
+                        : Number((otMins / 60).toFixed(2))
+                      : null;
+
+                  return (
+                    <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-6 py-3.5 font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
+                        <span>{rec.date}</span>
+                        <span
+                          className={`ml-2 font-sans font-medium ${
+                            isSun ? 'text-amber-700' : 'text-slate-400'
+                          }`}
                         >
-                          <Edit3 className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onDeleteRecord(rec)}
-                          className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-700"
-                          aria-label={`Delete attendance for ${rec.empName}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {getDayNameShort(rec.date)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 font-mono text-xs font-medium text-slate-700 tabular-nums whitespace-nowrap">
+                        {rec.empCode}
+                      </td>
+                      <td className="px-4 py-3.5 font-medium text-slate-900 whitespace-nowrap">
+                        {rec.empName}
+                      </td>
+                      <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
+                        {formatDisplayTime(rec.inTime)}
+                      </td>
+                      <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
+                        {rec.outTime ? formatDisplayTime(rec.outTime) : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
+                        {awayMins > 0 ? `${awayMins}m` : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap">
+                        {rec.netMinutes !== null
+                          ? `${formatDurationHM(rec.netMinutes)} · ${rec.netDecimalHours?.toFixed(2)}h`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
+                        {otMins !== null && otMins > 0 ? (
+                          <span className="text-amber-700">
+                            {formatDurationHM(otMins)} · {otDec?.toFixed(2)}h
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <StatusLabel status={rec.status} />
+                      </td>
+                      <td className="px-6 py-3.5 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setEditing({ ...rec })}
+                            className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                            aria-label={`Edit attendance for ${rec.empName}`}
+                          >
+                            <Edit3 className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDeleteRecord(rec)}
+                            className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-700"
+                            aria-label={`Delete attendance for ${rec.empName}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -322,7 +403,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
             </div>
 
             <form onSubmit={handleEditSave} className="space-y-4 px-6 py-5">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700">Date</label>
                   <input
@@ -334,7 +415,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-700">Break (mins)</label>
+                  <label className="block text-xs font-medium text-slate-700">Lunch (mins)</label>
                   <input
                     type="number"
                     min={0}
@@ -342,6 +423,22 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                     value={editing.breakMinutes}
                     onChange={(e) =>
                       setEditing({ ...editing, breakMinutes: Number(e.target.value) || 0 })
+                    }
+                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700">Away (mins)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={600}
+                    value={Math.round((editing.pausedTotalSeconds ?? 0) / 60)}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        pausedTotalSeconds: Math.max(0, Number(e.target.value) || 0) * 60,
+                      })
                     }
                     className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
                   />
@@ -375,13 +472,23 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               </div>
 
               {editPreview && (
-                <div className="rounded-lg border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs flex items-center justify-between">
-                  <span className="text-slate-700">
-                    Break -{editPreview.breakDeductedMinutes}m applied
-                  </span>
-                  <span className="font-mono font-semibold text-teal-900 tabular-nums">
-                    Working Hours: {editPreview.netDecimalHours.toFixed(2)}h
-                  </span>
+                <div className="rounded-lg border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-700">
+                      Lunch -{editPreview.breakDeductedMinutes}m applied
+                    </span>
+                    <span className="font-mono font-semibold text-teal-900 tabular-nums">
+                      Working: {editPreview.netDecimalHours.toFixed(2)}h
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-700">
+                      {editPreview.isSunday ? 'Sunday Rule (100% OT)' : 'Overtime (>8h)'}
+                    </span>
+                    <span className="font-mono font-semibold text-amber-800 tabular-nums">
+                      OT: {editPreview.overtimeDecimalHours.toFixed(2)}h
+                    </span>
+                  </div>
                 </div>
               )}
 

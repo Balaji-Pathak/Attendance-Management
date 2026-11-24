@@ -45,7 +45,7 @@
     },
     "AttendanceRecord": {
       "title": "AttendanceRecord",
-      "description": "Daily employee attendance entry marked by guard with automatic 30-minute break deduction.",
+      "description": "Daily employee attendance entry marked by guard with live shift timer, break pause/resume tracking, 30-minute lunch deduction, and 8h/Sunday overtime calculation.",
       "type": "object",
       "properties": {
         "id": {
@@ -88,6 +88,18 @@
           "maxLength": 5,
           "pattern": "^\\d{2}:\\d{2}$"
         },
+        "startedAtMs": {
+          "type": "integer"
+        },
+        "isPaused": {
+          "type": "boolean"
+        },
+        "pausedAtMs": {
+          "type": "integer"
+        },
+        "pausedTotalSeconds": {
+          "type": "integer"
+        },
         "grossMinutes": {
           "type": "integer"
         },
@@ -99,6 +111,15 @@
         },
         "netDecimalHours": {
           "type": "number"
+        },
+        "overtimeMinutes": {
+          "type": "integer"
+        },
+        "overtimeDecimalHours": {
+          "type": "number"
+        },
+        "isSunday": {
+          "type": "boolean"
         },
         "status": {
           "type": "string",
@@ -123,7 +144,10 @@
         "empCode",
         "empName",
         "inTime",
+        "isPaused",
+        "pausedTotalSeconds",
         "breakMinutes",
+        "isSunday",
         "status",
         "syncedToSheet",
         "createdAt",

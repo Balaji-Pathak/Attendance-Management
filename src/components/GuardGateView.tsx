@@ -1,12 +1,25 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Lock, LogIn, LogOut, Search, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  Lock,
+  LogIn,
+  LogOut,
+  Pause,
+  Play,
+  Search,
+  Timer,
+  X,
+} from 'lucide-react';
 import { AttendanceRecord, GateEmployeeView } from '../types/attendance';
 import {
-  calculateShiftMetrics,
+  calculateMetricsFromWorkedMinutes,
+  computeLiveElapsedSeconds,
   formatDisplayDate,
   formatDisplayTime,
   formatDurationHM,
+  formatHMS,
   getCurrentHHMM,
+  isSundayISO,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -15,6 +28,8 @@ interface GuardGateViewProps {
   todayRecords: AttendanceRecord[];
   serverDate: string;
   onMarkIn: (empId: string) => Promise<void>;
+  onPauseTiming: (recordId: string) => Promise<void>;
+  onResumeTiming: (recordId: string) => Promise<void>;
   onMarkOut: (recordId: string) => Promise<void>;
   onOpenAdminGate: () => void;
 }
@@ -32,6 +47,8 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
   todayRecords,
   serverDate,
   onMarkIn,
+  onPauseTiming,
+  onResumeTiming,
   onMarkOut,
   onOpenAdminGate,
 }) => {
@@ -40,6 +57,7 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
   const [nowTime, setNowTime] = useState<Date>(() => new Date());
   const [pendingAction, setPendingAction] = useState<PendingGateAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [busyRecordId, setBusyRecordId] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNowTime(new Date()), 1000);
@@ -94,14 +112,41 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
     });
   }, [employees, recordByEmp, filter, searchQuery]);
 
+  const nowMs = nowTime.getTime();
   const liveNowHHMM = useMemo(() => getCurrentHHMM(), [nowTime]);
 
   const checkoutPreview = useMemo(() => {
     if (!pendingAction || pendingAction.mode !== 'out' || !pendingAction.record) {
       return null;
     }
-    return calculateShiftMetrics(pendingAction.record.inTime, liveNowHHMM, 30);
-  }, [pendingAction, liveNowHHMM]);
+    const rec = pendingAction.record;
+    const workedSec = computeLiveElapsedSeconds(rec, nowMs);
+    const activePauseSec =
+      rec.isPaused && typeof rec.pausedAtMs === 'number'
+        ? Math.max(0, Math.floor((nowMs - rec.pausedAtMs) / 1000))
+        : 0;
+    const totalAwayMinutes = Math.round(((rec.pausedTotalSeconds ?? 0) + activePauseSec) / 60);
+    const calc = calculateMetricsFromWorkedMinutes(
+      Math.round(workedSec / 60),
+      rec.breakMinutes ?? 30,
+      rec.date
+    );
+    return { ...calc, totalAwayMinutes };
+  }, [pendingAction, nowMs]);
+
+  const handleTogglePause = async (rec: AttendanceRecord) => {
+    if (busyRecordId) return;
+    setBusyRecordId(rec.id);
+    try {
+      if (rec.isPaused) {
+        await onResumeTiming(rec.id);
+      } else {
+        await onPauseTiming(rec.id);
+      }
+    } finally {
+      setBusyRecordId(null);
+    }
+  };
 
   const handleConfirm = async () => {
     if (!pendingAction) return;
@@ -125,6 +170,8 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
     hour12: true,
   });
 
+  const isTodaySunday = isSundayISO(serverDate);
+
   return (
     <div className="space-y-5">
       {/* Live Clock Header Card */}
@@ -133,6 +180,7 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
           <div>
             <p className="text-xs font-medium text-slate-500">
               {formatDisplayDate(serverDate)} · Live Gate Clock
+              {isTodaySunday ? ' · Sunday (All Hours = Overtime)' : ''}
             </p>
             <div className="mt-1 font-mono text-3xl sm:text-4xl font-semibold tracking-tight text-slate-900 tabular-nums">
               {liveClockStr}
@@ -141,9 +189,9 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
 
           <div className="text-xs text-slate-600 sm:text-right space-y-1">
             <div className="font-medium text-slate-900">
-              Automatic 30-minute break deduction on Mark Out
+              8h Shift · 30m Lunch Break Deducted on Mark Out
             </div>
-            <div>Timestamps are locked to current live time</div>
+            <div>Use Stop Timing when staff step out for tea or errands</div>
           </div>
         </div>
       </section>
@@ -241,6 +289,13 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
             {filteredEmployees.map((emp) => {
               const rec = recordByEmp.get(emp.id);
               const status = !rec ? 'not_in' : rec.status;
+              const isLive = rec?.status === 'on_duty';
+              const elapsedSec = isLive && rec ? computeLiveElapsedSeconds(rec, nowMs) : 0;
+              const activePauseSec =
+                isLive && rec?.isPaused && typeof rec.pausedAtMs === 'number'
+                  ? Math.max(0, Math.floor((nowMs - rec.pausedAtMs) / 1000))
+                  : 0;
+              const totalAwaySec = (rec?.pausedTotalSeconds ?? 0) + activePauseSec;
 
               return (
                 <div
@@ -272,6 +327,37 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                           </span>
                         </>
                       )}
+
+                      {isLive && rec && (
+                        <>
+                          <span aria-hidden="true" className="text-slate-300">
+                            ·
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1.5 font-mono font-semibold tabular-nums ${
+                              rec.isPaused ? 'text-amber-700' : 'text-emerald-700'
+                            }`}
+                          >
+                            <Timer className="h-3.5 w-3.5" />
+                            <span>
+                              {rec.isPaused
+                                ? `Paused · ${formatHMS(elapsedSec)}`
+                                : formatHMS(elapsedSec)}
+                            </span>
+                          </span>
+                          {totalAwaySec >= 60 && (
+                            <>
+                              <span aria-hidden="true" className="text-slate-300">
+                                ·
+                              </span>
+                              <span className="font-mono text-amber-700 tabular-nums">
+                                Away: {Math.round(totalAwaySec / 60)}m
+                              </span>
+                            </>
+                          )}
+                        </>
+                      )}
+
                       {rec?.outTime && (
                         <>
                           <span aria-hidden="true" className="text-slate-300">
@@ -286,12 +372,22 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                           <span className="font-mono font-semibold text-teal-800 tabular-nums">
                             {formatDurationHM(rec.netMinutes)} ({rec.netDecimalHours?.toFixed(2)}h)
                           </span>
+                          {(rec.overtimeMinutes ?? 0) > 0 && (
+                            <>
+                              <span aria-hidden="true" className="text-slate-300">
+                                ·
+                              </span>
+                              <span className="font-mono font-semibold text-amber-700 tabular-nums">
+                                OT: {(rec.overtimeDecimalHours ?? 0).toFixed(2)}h
+                              </span>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
                   </div>
 
-                  <div className="shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
                     {!rec ? (
                       <button
                         type="button"
@@ -302,16 +398,40 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                         <span>Mark IN</span>
                       </button>
                     ) : rec.status === 'on_duty' ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setPendingAction({ mode: 'out', employee: emp, record: rec })
-                        }
-                        className="inline-flex w-full sm:w-auto min-h-[44px] items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-teal-800 active:scale-[0.99] transition-all whitespace-nowrap shrink-0"
-                      >
-                        <LogOut className="h-4 w-4" />
-                        <span>Mark OUT</span>
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          disabled={busyRecordId === rec.id}
+                          onClick={() => handleTogglePause(rec)}
+                          className={`inline-flex flex-1 sm:flex-initial min-h-[44px] items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap shrink-0 disabled:opacity-60 ${
+                            rec.isPaused
+                              ? 'bg-slate-900 text-white hover:bg-slate-800'
+                              : 'border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                          }`}
+                        >
+                          {rec.isPaused ? (
+                            <>
+                              <Play className="h-4 w-4" />
+                              <span>Start Timing</span>
+                            </>
+                          ) : (
+                            <>
+                              <Pause className="h-4 w-4" />
+                              <span>Stop Timing</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPendingAction({ mode: 'out', employee: emp, record: rec })
+                          }
+                          className="inline-flex flex-1 sm:flex-initial min-h-[44px] items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-teal-800 active:scale-[0.99] transition-all whitespace-nowrap shrink-0"
+                        >
+                          <LogOut className="h-4 w-4" />
+                          <span>Mark OUT</span>
+                        </button>
+                      </>
                     ) : (
                       <div className="inline-flex min-h-[44px] items-center gap-1.5 px-3 text-xs font-medium text-teal-800 whitespace-nowrap">
                         <CheckCircle2 className="h-4 w-4" />
@@ -326,7 +446,7 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
         )}
       </section>
 
-      {/* Strict Live-Time 1-Tap Confirmation Modal (No editable fields for Guard) */}
+      {/* Strict Live-Time 1-Tap Confirmation Modal */}
       {pendingAction && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
@@ -383,8 +503,16 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                   </div>
                   {checkoutPreview && (
                     <>
+                      {checkoutPreview.totalAwayMinutes > 0 && (
+                        <div className="flex items-center justify-between text-slate-700">
+                          <span>Away / Paused Time</span>
+                          <span className="font-mono font-medium text-amber-800 tabular-nums">
+                            -{checkoutPreview.totalAwayMinutes} min
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between text-slate-700">
-                        <span>Break Deducted</span>
+                        <span>Lunch Break Deducted</span>
                         <span className="font-mono font-medium text-amber-800 tabular-nums">
                           -{checkoutPreview.breakDeductedMinutes} min
                         </span>
@@ -393,6 +521,14 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                         <span>Working Hours</span>
                         <span className="font-mono tabular-nums">
                           {formatDurationHM(checkoutPreview.netMinutes)} ({checkoutPreview.netDecimalHours.toFixed(2)}h)
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs font-semibold text-amber-800">
+                        <span>
+                          {checkoutPreview.isSunday ? 'Sunday Overtime (100%)' : 'Overtime (>8h)'}
+                        </span>
+                        <span className="font-mono tabular-nums">
+                          {formatDurationHM(checkoutPreview.overtimeMinutes)} ({checkoutPreview.overtimeDecimalHours.toFixed(2)}h)
                         </span>
                       </div>
                     </>
@@ -433,3 +569,4 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
     </div>
   );
 };
+

@@ -70,10 +70,15 @@ service cloud.firestore {
           'empName',
           'inTime',
           'outTime',
+          'isPaused',
+          'pausedTotalSeconds',
           'grossMinutes',
           'breakMinutes',
           'netMinutes',
           'netDecimalHours',
+          'overtimeMinutes',
+          'overtimeDecimalHours',
+          'isSunday',
           'status',
           'syncedToSheet',
           'createdAt',
@@ -87,10 +92,17 @@ service cloud.firestore {
           'empName',
           'inTime',
           'outTime',
+          'startedAtMs',
+          'isPaused',
+          'pausedAtMs',
+          'pausedTotalSeconds',
           'grossMinutes',
           'breakMinutes',
           'netMinutes',
           'netDecimalHours',
+          'overtimeMinutes',
+          'overtimeDecimalHours',
+          'isSunday',
           'status',
           'syncedToSheet',
           'createdAt',
@@ -103,10 +115,17 @@ service cloud.firestore {
         && data.empName is string && data.empName.size() >= 1 && data.empName.size() <= 80
         && data.inTime is string && data.inTime.size() == 5 && data.inTime.matches('^\\d{2}:\\d{2}$')
         && (data.outTime == null || (data.outTime is string && data.outTime.size() == 5 && data.outTime.matches('^\\d{2}:\\d{2}$')))
+        && (!('startedAtMs' in data) || data.startedAtMs == null || (data.startedAtMs is int && data.startedAtMs >= 0))
+        && data.isPaused is bool
+        && (!('pausedAtMs' in data) || data.pausedAtMs == null || (data.pausedAtMs is int && data.pausedAtMs >= 0))
+        && data.pausedTotalSeconds is int && data.pausedTotalSeconds >= 0 && data.pausedTotalSeconds <= 86400
         && (data.grossMinutes == null || (data.grossMinutes is int && data.grossMinutes >= 0 && data.grossMinutes <= 1440))
         && data.breakMinutes is int && data.breakMinutes >= 0 && data.breakMinutes <= 180
         && (data.netMinutes == null || (data.netMinutes is int && data.netMinutes >= 0 && data.netMinutes <= 1440))
         && (data.netDecimalHours == null || (data.netDecimalHours is number && data.netDecimalHours >= 0 && data.netDecimalHours <= 24))
+        && (data.overtimeMinutes == null || (data.overtimeMinutes is int && data.overtimeMinutes >= 0 && data.overtimeMinutes <= 1440))
+        && (data.overtimeDecimalHours == null || (data.overtimeDecimalHours is number && data.overtimeDecimalHours >= 0 && data.overtimeDecimalHours <= 24))
+        && data.isSunday is bool
         && data.status in ['on_duty', 'completed', 'short_shift']
         && data.syncedToSheet is bool
         && data.createdAt is timestamp
@@ -172,9 +191,15 @@ service cloud.firestore {
             && get(/databases/$(database)/documents/employees/$(incoming().empId)).data.active == true
             && incoming().status == 'on_duty'
             && incoming().outTime == null
+            && incoming().startedAtMs is int
+            && incoming().isPaused == false
+            && (!('pausedAtMs' in incoming()) || incoming().pausedAtMs == null)
+            && incoming().pausedTotalSeconds == 0
             && incoming().grossMinutes == null
             && incoming().netMinutes == null
             && incoming().netDecimalHours == null
+            && incoming().overtimeMinutes == null
+            && incoming().overtimeDecimalHours == null
             && incoming().breakMinutes == 30
             && incoming().syncedToSheet == false
           )
@@ -189,27 +214,82 @@ service cloud.firestore {
           || (
             existing().status == 'on_duty'
             && existing().outTime == null
-            && incoming().status in ['completed', 'short_shift']
-            && incoming().outTime is string
-            && incoming().grossMinutes is int
-            && incoming().netMinutes is int
-            && incoming().netDecimalHours is number
             && incoming().date == existing().date
             && incoming().empId == existing().empId
             && incoming().empCode == existing().empCode
             && incoming().empName == existing().empName
             && incoming().inTime == existing().inTime
             && incoming().breakMinutes == existing().breakMinutes
+            && incoming().get('startedAtMs', null) == existing().get('startedAtMs', null)
             && incoming().syncedToSheet == false
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'outTime',
-              'grossMinutes',
-              'netMinutes',
-              'netDecimalHours',
-              'status',
-              'syncedToSheet',
-              'updatedAt'
-            ])
+            && (
+              // Guard 1: Stop Timing (Pause)
+              (
+                existing().get('isPaused', false) == false
+                && incoming().status == 'on_duty'
+                && incoming().outTime == null
+                && incoming().isPaused == true
+                && incoming().pausedAtMs is int
+                && incoming().pausedTotalSeconds == existing().get('pausedTotalSeconds', 0)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'isPaused',
+                  'pausedAtMs',
+                  'pausedTotalSeconds',
+                  'isSunday',
+                  'overtimeMinutes',
+                  'overtimeDecimalHours',
+                  'updatedAt'
+                ])
+              )
+              ||
+              // Guard 2: Start Timing (Resume)
+              (
+                existing().get('isPaused', false) == true
+                && incoming().status == 'on_duty'
+                && incoming().outTime == null
+                && incoming().isPaused == false
+                && incoming().pausedAtMs == null
+                && incoming().pausedTotalSeconds >= existing().get('pausedTotalSeconds', 0)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'isPaused',
+                  'pausedAtMs',
+                  'pausedTotalSeconds',
+                  'isSunday',
+                  'overtimeMinutes',
+                  'overtimeDecimalHours',
+                  'updatedAt'
+                ])
+              )
+              ||
+              // Guard 3: Mark OUT (Finalize shift)
+              (
+                incoming().status in ['completed', 'short_shift']
+                && incoming().outTime is string
+                && incoming().isPaused == false
+                && incoming().pausedAtMs == null
+                && incoming().pausedTotalSeconds >= existing().get('pausedTotalSeconds', 0)
+                && incoming().grossMinutes is int
+                && incoming().netMinutes is int
+                && incoming().netDecimalHours is number
+                && incoming().overtimeMinutes is int
+                && incoming().overtimeDecimalHours is number
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'outTime',
+                  'isPaused',
+                  'pausedAtMs',
+                  'pausedTotalSeconds',
+                  'grossMinutes',
+                  'netMinutes',
+                  'netDecimalHours',
+                  'overtimeMinutes',
+                  'overtimeDecimalHours',
+                  'isSunday',
+                  'status',
+                  'syncedToSheet',
+                  'updatedAt'
+                ])
+              )
+            )
           )
         );
       allow delete: if isAdmin() && isValidId(recordId);

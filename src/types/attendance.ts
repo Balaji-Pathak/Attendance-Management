@@ -26,10 +26,17 @@ export interface AttendanceRecord {
   empName: string;
   inTime: string; // HH:MM (24h)
   outTime: string | null; // HH:MM (24h) or null if still on duty
+  startedAtMs?: number | null;
+  isPaused?: boolean;
+  pausedAtMs?: number | null;
+  pausedTotalSeconds?: number;
   grossMinutes: number | null;
   breakMinutes: number; // Deducted break minutes (30)
   netMinutes: number | null;
   netDecimalHours: number | null;
+  overtimeMinutes?: number | null;
+  overtimeDecimalHours?: number | null;
+  isSunday?: boolean;
   status: AttendanceStatus;
   syncedToSheet: boolean;
   updatedAt: string;

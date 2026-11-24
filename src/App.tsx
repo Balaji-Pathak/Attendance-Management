@@ -46,11 +46,14 @@ import {
   adminLoadStarterEmployees,
   adminMarkRecordsSynced,
   adminRemoveEmail,
+  adminSaveBulkAttendance,
   adminSaveEmployee,
   adminSaveSheetConfig,
   adminUpdateAttendance,
   guardMarkIn,
   guardMarkOut,
+  guardPauseTiming,
+  guardResumeTiming,
   subscribeActiveEmployees,
   subscribeAdminEmails,
   subscribeAllAttendance,
@@ -62,6 +65,7 @@ import {
   createMasterSpreadsheet,
   createOrUpdateStandaloneEmployeeSheet,
   extractSpreadsheetId,
+  importEmployeeGoogleSheet,
   listAppSpreadsheets,
   loadWorkbookData,
   revokeSpreadsheetAccess,
@@ -267,14 +271,61 @@ export default function App() {
     if (!rec) return;
     try {
       const updated = await guardMarkOut(rec);
+      const otPart =
+        updated.overtimeDecimalHours && updated.overtimeDecimalHours > 0
+          ? `, +${updated.overtimeDecimalHours.toFixed(2)}h OT`
+          : '';
       setNotice({
         type: 'success',
-        message: `Marked OUT: ${updated.empName} (${updated.netDecimalHours?.toFixed(2)}h after 30m break).`,
+        message: `Marked OUT: ${updated.empName} (${updated.netDecimalHours?.toFixed(2)}h net${otPart}).`,
       });
     } catch (err) {
       setNotice({
         type: 'error',
         message: (err as Error).message || 'Could not mark check-out.',
+      });
+    }
+  };
+
+  const handleGuardPauseTiming = async (recordId: string) => {
+    const rec = todayRecords.find((r) => r.id === recordId);
+    if (!rec || rec.isPaused) return;
+    const optimisticPausedAt = Date.now();
+    setTodayRecords((prev) =>
+      prev.map((r) =>
+        r.id === recordId ? { ...r, isPaused: true, pausedAtMs: optimisticPausedAt } : r
+      )
+    );
+    try {
+      const updated = await guardPauseTiming(rec);
+      setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? updated : r)));
+      setNotice({
+        type: 'info',
+        message: `Paused timer for ${updated.empName}. Tap "Start Timing" when they return.`,
+      });
+    } catch (err) {
+      setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? rec : r)));
+      setNotice({
+        type: 'error',
+        message: (err as Error).message || 'Could not pause working timer.',
+      });
+    }
+  };
+
+  const handleGuardResumeTiming = async (recordId: string) => {
+    const rec = todayRecords.find((r) => r.id === recordId);
+    if (!rec || !rec.isPaused) return;
+    try {
+      const updated = await guardResumeTiming(rec);
+      setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? updated : r)));
+      setNotice({
+        type: 'success',
+        message: `Resumed working timer for ${updated.empName}.`,
+      });
+    } catch (err) {
+      setNotice({
+        type: 'error',
+        message: (err as Error).message || 'Could not resume working timer.',
       });
     }
   };
@@ -786,6 +837,124 @@ export default function App() {
     });
   };
 
+  const mergeRecordsList = useCallback(
+    (existing: AttendanceRecord[], incoming: AttendanceRecord[]): AttendanceRecord[] => {
+      const map = new Map<string, AttendanceRecord>();
+      for (const r of existing) {
+        map.set(r.id, r);
+      }
+      for (const r of incoming) {
+        map.set(r.id, r);
+      }
+      return sortRecordsNewestFirst(Array.from(map.values()));
+    },
+    []
+  );
+
+  const handleImportEmployeeSheet = async (employee: Employee, sheetUrlOrId: string) => {
+    const token = getAccessToken();
+    if (!token) {
+      setActiveNav('sheets-sync');
+      setNotice({
+        type: 'info',
+        message: 'Connect Google Sheets in Google Sheets Sync first.',
+      });
+      return;
+    }
+
+    setIsSyncing(true);
+    try {
+      const imported = await importEmployeeGoogleSheet(token, sheetUrlOrId, employee);
+      if (imported.records.length === 0) {
+        setNotice({
+          type: 'error',
+          message: `No valid attendance rows found in "${imported.spreadsheetTitle}". Check that Date and In/Out columns exist.`,
+        });
+        return;
+      }
+
+      await adminSaveBulkAttendance(imported.records, true);
+      const updatedEmp: Employee = {
+        ...employee,
+        individualSheetId: imported.spreadsheetId,
+        individualSheetUrl: imported.spreadsheetUrl,
+      };
+      await adminSaveEmployee(updatedEmp);
+      upsertLocalEmployee(updatedEmp);
+
+      const nextRecords = mergeRecordsList(records, imported.records);
+      setRecords(nextRecords);
+
+      await shareSheetsWithEmails(token, [imported.spreadsheetId], getAllAdminEmails());
+
+      if (sheetConfig) {
+        const nextEmps = employees.map((e) => (e.id === employee.id ? updatedEmp : e));
+        await syncOneEmployeeAndMaster(updatedEmp, nextEmps, nextRecords);
+      }
+
+      const totalOt = imported.records.reduce(
+        (acc, r) => acc + (r.overtimeDecimalHours ?? 0),
+        0
+      );
+      setNotice({
+        type: 'success',
+        message: `Imported ${imported.records.length} day(s) (${totalOt.toFixed(2)}h overtime) from "${imported.spreadsheetTitle}" for ${employee.name}.`,
+      });
+    } catch (err) {
+      handleGoogleError(err, 'Failed to import employee Google Sheet.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSaveEmployeeMonthRecords = async (
+    employee: Employee,
+    monthRecords: AttendanceRecord[],
+    syncToStandaloneSheet: boolean
+  ) => {
+    setIsSyncing(true);
+    try {
+      await adminSaveBulkAttendance(monthRecords, false);
+      const nextRecords = mergeRecordsList(records, monthRecords);
+      setRecords(nextRecords);
+
+      const token = getAccessToken();
+      let updatedEmp = employee;
+
+      if (syncToStandaloneSheet && token) {
+        const res = await createOrUpdateStandaloneEmployeeSheet(token, employee, nextRecords);
+        updatedEmp = {
+          ...employee,
+          individualSheetId: res.spreadsheetId,
+          individualSheetUrl: res.spreadsheetUrl,
+        };
+        await adminSaveEmployee(updatedEmp);
+        upsertLocalEmployee(updatedEmp);
+        await shareSheetsWithEmails(token, [res.spreadsheetId], getAllAdminEmails());
+        await adminMarkRecordsSynced(monthRecords);
+        await refreshDriveFiles(token);
+      }
+
+      if (sheetConfig && token) {
+        const nextEmps = employees.map((e) => (e.id === employee.id ? updatedEmp : e));
+        await syncOneEmployeeAndMaster(updatedEmp, nextEmps, nextRecords);
+      }
+
+      const totalOt = monthRecords.reduce(
+        (acc, r) => acc + (r.overtimeDecimalHours ?? 0),
+        0
+      );
+      setNotice({
+        type: 'success',
+        message: `Saved ${monthRecords.length} day(s) (${totalOt.toFixed(2)}h overtime) to ${employee.name}'s history${syncToStandaloneSheet && token ? ' and updated Google Sheets' : ''}.`,
+      });
+    } catch (err) {
+      handleGoogleError(err, 'Could not save monthly attendance records.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const handlePullFromSheet = () => {
     if (!sheetConfig) return;
     setConfirmRequest({
@@ -1109,6 +1278,8 @@ export default function App() {
               todayRecords={todayRecords}
               serverDate={todayDate}
               onMarkIn={handleGuardMarkIn}
+              onPauseTiming={handleGuardPauseTiming}
+              onResumeTiming={handleGuardResumeTiming}
               onMarkOut={handleGuardMarkOut}
               onOpenAdminGate={() => setActiveNav('employees')}
             />
@@ -1143,6 +1314,8 @@ export default function App() {
               isGoogleAuthed={hasGoogleToken}
               onRequestSyncEmployeeTab={handleRequestSyncEmployeeTab}
               onRequestStandaloneSheet={handleRequestStandaloneSheet}
+              onImportEmployeeSheet={handleImportEmployeeSheet}
+              onSaveEmployeeMonthRecords={handleSaveEmployeeMonthRecords}
             />
           )}
 

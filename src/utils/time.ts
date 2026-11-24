@@ -66,8 +66,62 @@ export function parseDisplayTimeToHHMM(input: string | null | undefined): string
   return null;
 }
 
-export function formatDurationHM(totalMinutes: number | null): string {
-  if (totalMinutes === null || Number.isNaN(totalMinutes)) return '—';
+export const STANDARD_SHIFT_MINUTES = 480; // 8 hours standard shift
+
+export function isSundayISO(dateIso: string): boolean {
+  const parts = dateIso.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return false;
+  const [y, m, d] = parts;
+  return new Date(y, m - 1, d).getDay() === 0;
+}
+
+export function getDayNameShort(dateIso: string): string {
+  const parts = dateIso.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return '';
+  const [y, m, d] = parts;
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short' });
+}
+
+export function formatHMS(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hrs = Math.floor(safe / 3600);
+  const mins = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+export function getRecordStartTimestampMs(
+  record: Pick<AttendanceRecord, 'date' | 'inTime' | 'startedAtMs'>
+): number {
+  if (typeof record.startedAtMs === 'number' && record.startedAtMs > 0) {
+    return record.startedAtMs;
+  }
+  const [y, m, d] = record.date.split('-').map(Number);
+  const [hh, mm] = record.inTime.split(':').map(Number);
+  if (!y || !m || !d || Number.isNaN(hh) || Number.isNaN(mm)) {
+    return Date.now();
+  }
+  return new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
+}
+
+export function computeLiveElapsedSeconds(
+  record: Pick<
+    AttendanceRecord,
+    'date' | 'inTime' | 'startedAtMs' | 'isPaused' | 'pausedAtMs' | 'pausedTotalSeconds'
+  >,
+  nowMs: number
+): number {
+  const startMs = getRecordStartTimestampMs(record);
+  const pausedPrev = Math.max(0, record.pausedTotalSeconds ?? 0);
+  const endMs =
+    record.isPaused && typeof record.pausedAtMs === 'number' && record.pausedAtMs > 0
+      ? record.pausedAtMs
+      : nowMs;
+  return Math.max(0, Math.floor((endMs - startMs) / 1000) - pausedPrev);
+}
+
+export function formatDurationHM(totalMinutes: number | null | undefined): string {
+  if (totalMinutes === null || totalMinutes === undefined || Number.isNaN(totalMinutes)) return '—';
   const safe = Math.max(0, Math.round(totalMinutes));
   const hrs = Math.floor(safe / 60);
   const mins = safe % 60;
@@ -79,14 +133,50 @@ export interface ShiftCalculationResult {
   breakDeductedMinutes: number;
   netMinutes: number;
   netDecimalHours: number;
+  overtimeMinutes: number;
+  overtimeDecimalHours: number;
+  isSunday: boolean;
   isOvernight: boolean;
   status: AttendanceStatus;
+}
+
+export function calculateMetricsFromWorkedMinutes(
+  grossActiveMinutes: number,
+  breakMinutes: number,
+  dateIso?: string,
+  isOvernight = false
+): ShiftCalculationResult {
+  const grossMinutes = Math.max(0, Math.round(grossActiveMinutes));
+  const safeBreak = Math.max(0, breakMinutes);
+  const breakDeductedMinutes = grossMinutes >= safeBreak ? safeBreak : grossMinutes;
+  const netMinutes = Math.max(0, grossMinutes - breakDeductedMinutes);
+  const netDecimalHours = Number((netMinutes / 60).toFixed(2));
+  const isSunday = dateIso ? isSundayISO(dateIso) : false;
+  const overtimeMinutes = isSunday
+    ? netMinutes
+    : Math.max(0, netMinutes - STANDARD_SHIFT_MINUTES);
+  const overtimeDecimalHours = Number((overtimeMinutes / 60).toFixed(2));
+  const status: AttendanceStatus = netMinutes < 240 ? 'short_shift' : 'completed';
+
+  return {
+    grossMinutes,
+    breakDeductedMinutes,
+    netMinutes,
+    netDecimalHours,
+    overtimeMinutes,
+    overtimeDecimalHours,
+    isSunday,
+    isOvernight,
+    status,
+  };
 }
 
 export function calculateShiftMetrics(
   inTime: string,
   outTime: string,
-  breakMinutes = 30
+  breakMinutes = 30,
+  dateIso?: string,
+  pausedMinutes = 0
 ): ShiftCalculationResult {
   const inMins = parseTimeToMinutes(inTime);
   let outMins = parseTimeToMinutes(outTime);
@@ -97,21 +187,29 @@ export function calculateShiftMetrics(
     isOvernight = true;
   }
 
-  const grossMinutes = Math.max(0, outMins - inMins);
-  const safeBreak = Math.max(0, breakMinutes);
-  const breakDeductedMinutes = grossMinutes >= safeBreak ? safeBreak : grossMinutes;
-  const netMinutes = Math.max(0, grossMinutes - breakDeductedMinutes);
-  const netDecimalHours = Number((netMinutes / 60).toFixed(2));
-  const status: AttendanceStatus = netMinutes < 240 ? 'short_shift' : 'completed';
+  const spanMinutes = Math.max(0, outMins - inMins);
+  const activeGrossMinutes = Math.max(0, spanMinutes - Math.max(0, pausedMinutes));
+  return calculateMetricsFromWorkedMinutes(activeGrossMinutes, breakMinutes, dateIso, isOvernight);
+}
 
-  return {
-    grossMinutes,
-    breakDeductedMinutes,
-    netMinutes,
-    netDecimalHours,
-    isOvernight,
-    status,
-  };
+export function getMonthDays(
+  yearMonth: string
+): Array<{ date: string; dayShort: string; isSunday: boolean }> {
+  const [yStr, mStr] = yearMonth.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  if (!y || !m || m < 1 || m > 12) return [];
+  const totalDays = new Date(y, m, 0).getDate();
+  const days: Array<{ date: string; dayShort: string; isSunday: boolean }> = [];
+  for (let d = 1; d <= totalDays; d += 1) {
+    const date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    days.push({
+      date,
+      dayShort: getDayNameShort(date),
+      isSunday: isSundayISO(date),
+    });
+  }
+  return days;
 }
 
 export function formatDisplayDate(dateIso: string): string {
@@ -182,3 +280,4 @@ export function sortRecordsNewestFirst(records: AttendanceRecord[]): AttendanceR
     return b.inTime.localeCompare(a.inTime);
   });
 }
+
