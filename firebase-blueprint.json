@@ -180,6 +180,28 @@
         }
       },
       "required": ["email", "createdAt"]
+    },
+    "AdminEmail": {
+      "title": "AdminEmail",
+      "description": "Authorized company Gmail address permitted to sign in as Admin.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "addedBy": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["email", "addedBy", "createdAt"]
     }
   },
   "firestore": {
@@ -198,6 +220,10 @@
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminUser" },
       "description": "Delegated admin UIDs managed by the primary owner admin."
+    },
+    "/admin_emails/{email}": {
+      "schema": { "$ref": "#/entities/AdminEmail" },
+      "description": "Company Admin Gmail allowlist keyed by lowercase email address."
     }
   }
 }

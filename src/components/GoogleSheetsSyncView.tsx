@@ -4,12 +4,17 @@ import {
   ExternalLink,
   FilePlus2,
   FileSpreadsheet,
+  Info,
   Link2,
   LogOut,
   RefreshCw,
+  ShieldCheck,
+  Trash2,
+  UserPlus,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
-import { DriveSpreadsheetItem, SheetConfig } from '../types/attendance';
+import { AdminEmailEntry, DriveSpreadsheetItem, SheetConfig } from '../types/attendance';
+import { PRIMARY_ADMIN_EMAIL } from '../services/firebaseAuth';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface GoogleSheetsSyncViewProps {
@@ -27,6 +32,9 @@ interface GoogleSheetsSyncViewProps {
   onRequestSyncAll: () => void;
   onPullFromSheet: () => void;
   onDisconnectSheet: () => void;
+  adminEmails: AdminEmailEntry[];
+  onAddAdminEmail: (email: string) => Promise<void>;
+  onRemoveAdminEmail: (email: string) => void;
 }
 
 export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
@@ -44,9 +52,27 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
   onRequestSyncAll,
   onPullFromSheet,
   onDisconnectSheet,
+  adminEmails,
+  onAddAdminEmail,
+  onRemoveAdminEmail,
 }) => {
   const [newSheetTitle, setNewSheetTitle] = useState('GateLog Attendance Master');
   const [manualUrlOrId, setManualUrlOrId] = useState('');
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [addingAdmin, setAddingAdmin] = useState(false);
+
+  const handleAdminFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = newAdminEmail.trim().toLowerCase();
+    if (!cleaned || addingAdmin) return;
+    setAddingAdmin(true);
+    try {
+      await onAddAdminEmail(cleaned);
+      setNewAdminEmail('');
+    } finally {
+      setAddingAdmin(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -309,6 +335,99 @@ export const GoogleSheetsSyncView: React.FC<GoogleSheetsSyncViewProps> = ({
           </section>
         </>
       )}
+
+      <section className="rounded-xl border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-6 py-4">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-teal-700 shrink-0" />
+            <h3 className="text-sm font-semibold text-slate-900">
+              Authorized Company Admins
+            </h3>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Allow additional company Gmail accounts to unlock Admin tabs, manage employees, and sync Google Sheets.
+          </p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <form onSubmit={handleAdminFormSubmit} className="flex flex-wrap gap-2">
+            <input
+              type="email"
+              required
+              value={newAdminEmail}
+              onChange={(e) => setNewAdminEmail(e.target.value)}
+              placeholder="colleague@gmail.com"
+              className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={addingAdmin}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <UserPlus className="h-3.5 w-3.5" />
+              <span>{addingAdmin ? 'Adding...' : 'Add Admin Gmail'}</span>
+            </button>
+          </form>
+
+          <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between gap-4 px-4 py-3 bg-slate-50/60">
+              <div className="min-w-0">
+                <div className="truncate font-mono text-xs font-medium text-slate-900">
+                  {PRIMARY_ADMIN_EMAIL}
+                </div>
+                <div className="mt-0.5 text-xs text-slate-500">
+                  Primary Owner Admin (always authorized)
+                </div>
+              </div>
+              <span className="text-xs font-medium text-teal-700 whitespace-nowrap shrink-0">
+                Owner
+              </span>
+            </div>
+
+            {adminEmails
+              .filter((entry) => entry.email !== PRIMARY_ADMIN_EMAIL)
+              .map((entry) => (
+                <div
+                  key={entry.email}
+                  className="flex items-center justify-between gap-4 px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-xs font-medium text-slate-900">
+                      {entry.email}
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      Added by {entry.addedBy || PRIMARY_ADMIN_EMAIL}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveAdminEmail(entry.email)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 whitespace-nowrap shrink-0"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Remove</span>
+                  </button>
+                </div>
+              ))}
+          </div>
+
+          <div className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-50 p-3.5 text-xs leading-relaxed text-slate-600">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
+            <div>
+              <span className="font-medium text-slate-800">Google OAuth Note for Other Gmails: </span>
+              If a newly added Gmail sees Google&apos;s{' '}
+              <span className="font-mono text-slate-800">Error 403: access_denied</span> screen, open{' '}
+              <span className="font-medium text-slate-800">
+                Google Cloud Console → APIs &amp; Services → OAuth consent screen (Audience)
+              </span>{' '}
+              for project <span className="font-mono text-slate-800">gen-lang-client-0550725378</span> and either add their Gmail under{' '}
+              <span className="font-medium text-slate-800">Test users</span> or click{' '}
+              <span className="font-medium text-slate-800">Publish App</span> so any Google account can sign in.
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 };
+

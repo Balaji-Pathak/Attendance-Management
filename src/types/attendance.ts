@@ -72,3 +72,9 @@ export interface AdminAuthStatus {
   isAdminClaimed: boolean;
   adminEmail: string | null;
 }
+
+export interface AdminEmailEntry {
+  email: string;
+  addedBy: string;
+  createdAt: string;
+}

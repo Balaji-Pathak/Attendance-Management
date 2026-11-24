@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import {
+  AdminEmailEntry,
   AttendanceRecord,
   ConfirmRequest,
   DriveSpreadsheetItem,
@@ -35,18 +36,22 @@ import {
   googleSignIn,
   initAuth,
   logout,
+  PRIMARY_ADMIN_EMAIL,
 } from './services/firebaseAuth';
 import {
+  adminAddEmail,
   adminDeleteAttendance,
   adminImportFromSheet,
   adminLoadStarterEmployees,
   adminMarkRecordsSynced,
+  adminRemoveEmail,
   adminSaveEmployee,
   adminSaveSheetConfig,
   adminUpdateAttendance,
   guardMarkIn,
   guardMarkOut,
   subscribeActiveEmployees,
+  subscribeAdminEmails,
   subscribeAllAttendance,
   subscribeAllEmployees,
   subscribeTodayAttendance,
@@ -107,6 +112,7 @@ export default function App() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [sheetConfig, setSheetConfig] = useState<SheetConfig | null>(null);
+  const [adminEmails, setAdminEmails] = useState<AdminEmailEntry[]>([]);
   const [driveFiles, setDriveFiles] = useState<DriveSpreadsheetItem[]>([]);
   const [loadingDriveFiles, setLoadingDriveFiles] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -170,6 +176,7 @@ export default function App() {
       setEmployees([]);
       setRecords([]);
       setSheetConfig(null);
+      setAdminEmails([]);
       return;
     }
 
@@ -185,11 +192,16 @@ export default function App() {
       (cfg) => setSheetConfig(cfg),
       (err) => setNotice({ type: 'error', message: err.message })
     );
+    const unsubAdmins = subscribeAdminEmails(
+      (list) => setAdminEmails(list),
+      (err) => setNotice({ type: 'error', message: err.message })
+    );
 
     return () => {
       unsubEmps();
       unsubAtt();
       unsubSettings();
+      unsubAdmins();
     };
   }, [isAdminUnlocked]);
 
@@ -674,6 +686,48 @@ export default function App() {
     });
   };
 
+  const handleAddAdminEmail = async (email: string) => {
+    const emailLower = email.trim().toLowerCase();
+    if (emailLower === PRIMARY_ADMIN_EMAIL) {
+      setNotice({
+        type: 'info',
+        message: `${PRIMARY_ADMIN_EMAIL} is already the Primary Owner Admin.`,
+      });
+      return;
+    }
+    try {
+      await adminAddEmail(emailLower, googleUser?.email || PRIMARY_ADMIN_EMAIL);
+      setNotice({
+        type: 'success',
+        message: `Added ${emailLower} as an authorized Admin Gmail.`,
+      });
+    } catch (err) {
+      setNotice({
+        type: 'error',
+        message: (err as Error).message || 'Could not add Admin email.',
+      });
+    }
+  };
+
+  const handleRemoveAdminEmail = (email: string) => {
+    const emailLower = email.trim().toLowerCase();
+    if (emailLower === PRIMARY_ADMIN_EMAIL) return;
+    setConfirmRequest({
+      title: 'Remove Admin Gmail Access?',
+      description: `Revoke Admin dashboard access for ${emailLower}. They will no longer be able to edit employees or attendance.`,
+      affectedTarget: emailLower,
+      confirmLabel: 'Remove Admin',
+      destructive: true,
+      onConfirm: async () => {
+        await adminRemoveEmail(emailLower);
+        setNotice({
+          type: 'info',
+          message: `Removed Admin access for ${emailLower}.`,
+        });
+      },
+    });
+  };
+
   const currentNavItem = NAV_ITEMS.find((n) => n.id === activeNav) ?? NAV_ITEMS[0];
   const requiresAdminGate = currentNavItem.adminOnly && !isAdminUnlocked;
 
@@ -942,6 +996,9 @@ export default function App() {
               onDisconnectSheet={async () => {
                 await adminSaveSheetConfig(null);
               }}
+              adminEmails={adminEmails}
+              onAddAdminEmail={handleAddAdminEmail}
+              onRemoveAdminEmail={handleRemoveAdminEmail}
             />
           )}
         </main>

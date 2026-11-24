@@ -11,6 +11,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  AdminEmailEntry,
   AttendanceRecord,
   Employee,
   GateEmployeeView,
@@ -28,6 +29,7 @@ import { db, handleFirestoreError, OperationType } from './firebaseClient';
 const EMPLOYEES_COL = 'employees';
 const ATTENDANCE_COL = 'attendance';
 const SETTINGS_COL = 'settings';
+const ADMIN_EMAILS_COL = 'admin_emails';
 const WORKSPACE_DOC_ID = 'workspace';
 
 function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
@@ -468,3 +470,68 @@ export async function adminImportFromSheet(
     handleFirestoreError(error, OperationType.WRITE, SETTINGS_COL);
   }
 }
+
+export function subscribeAdminEmails(
+  onData: (list: AdminEmailEntry[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  return onSnapshot(
+    collection(db, ADMIN_EMAILS_COL),
+    (snapshot) => {
+      const list: AdminEmailEntry[] = snapshot.docs
+        .map((d) => {
+          const data = d.data();
+          const createdAtRaw = data.createdAt as { toDate?: () => Date } | string | undefined;
+          const createdAt =
+            createdAtRaw && typeof createdAtRaw === 'object' && typeof createdAtRaw.toDate === 'function'
+              ? createdAtRaw.toDate().toISOString()
+              : typeof createdAtRaw === 'string'
+              ? createdAtRaw
+              : new Date().toISOString();
+          return {
+            email: String(data.email ?? d.id).toLowerCase(),
+            addedBy: String(data.addedBy ?? ''),
+            createdAt,
+          };
+        })
+        .sort((a, b) => a.email.localeCompare(b.email));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, ADMIN_EMAILS_COL);
+      } catch (wrapped) {
+        onError(wrapped as Error);
+      }
+    }
+  );
+}
+
+export async function adminAddEmail(email: string, addedBy: string): Promise<void> {
+  const emailLower = email.trim().toLowerCase();
+  if (!/^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(emailLower) || emailLower.length > 120) {
+    throw new Error('Please enter a valid Gmail or Google Workspace email address.');
+  }
+
+  const path = `${ADMIN_EMAILS_COL}/${emailLower}`;
+  try {
+    await setDoc(doc(db, ADMIN_EMAILS_COL, emailLower), {
+      email: emailLower,
+      addedBy: (addedBy || 'admin').trim().toLowerCase().slice(0, 120),
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminRemoveEmail(email: string): Promise<void> {
+  const emailLower = email.trim().toLowerCase();
+  const path = `${ADMIN_EMAILS_COL}/${emailLower}`;
+  try {
+    await deleteDoc(doc(db, ADMIN_EMAILS_COL, emailLower));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+

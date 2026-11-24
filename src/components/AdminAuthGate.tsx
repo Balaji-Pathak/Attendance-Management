@@ -35,12 +35,16 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 space-y-1">
-          <div className="font-medium text-slate-800">Authorized Admin</div>
-          <div className="font-mono text-slate-600">{PRIMARY_ADMIN_EMAIL}</div>
-          {signedInEmail && signedInEmail.toLowerCase() !== PRIMARY_ADMIN_EMAIL && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 space-y-1.5">
+          <div className="font-medium text-slate-800">Authorized Company Admins</div>
+          <div className="text-slate-600 leading-relaxed">
+            Sign in with the primary admin account (
+            <span className="font-mono text-slate-800">{PRIMARY_ADMIN_EMAIL}</span>
+            ) or any company Gmail added under Google Sheets Sync → Authorized Company Admins.
+          </div>
+          {signedInEmail && (
             <div className="pt-1 text-red-700 font-medium">
-              Currently signed in as {signedInEmail}, which does not have Admin permission.
+              Currently signed in as {signedInEmail}, which does not have Admin permission yet.
             </div>
           )}
         </div>

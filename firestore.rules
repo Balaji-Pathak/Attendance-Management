@@ -10,6 +10,13 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidEmailId(email) {
+      return email is string
+        && email.size() >= 5
+        && email.size() <= 120
+        && email.matches('^[^@\\s/]+@[^@\\s/]+\\.[^@\\s/]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -26,8 +33,9 @@ service cloud.firestore {
       return isSignedIn()
         && request.auth.token.email_verified == true
         && (
-          request.auth.token.email == 'balajeepathak74@gmail.com'
+          request.auth.token.email.lower() == 'balajeepathak74@gmail.com'
           || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          || exists(/databases/$(database)/documents/admin_emails/$(request.auth.token.email.lower()))
         );
     }
 
@@ -131,6 +139,15 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidAdminEmail(data) {
+      return data.keys().hasAll(['email', 'addedBy', 'createdAt'])
+        && data.keys().hasOnly(['email', 'addedBy', 'createdAt'])
+        && isValidEmailId(data.email)
+        && data.email == data.email.lower()
+        && data.addedBy is string && data.addedBy.size() >= 3 && data.addedBy.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
     match /employees/{empId} {
       allow get: if isValidId(empId) && (isAdmin() || existing().active == true);
       allow list: if isAdmin() || resource.data.active == true;
@@ -214,6 +231,20 @@ service cloud.firestore {
         && isValidAdminUser(incoming())
         && incoming().createdAt == request.time;
       allow delete: if isAdmin() && isValidId(uid);
+    }
+
+    match /admin_emails/{email} {
+      allow get: if isValidEmailId(email)
+        && isSignedIn()
+        && request.auth.token.email_verified == true
+        && (isAdmin() || email == request.auth.token.email.lower());
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && isValidEmailId(email)
+        && isValidAdminEmail(incoming())
+        && incoming().email == email
+        && incoming().createdAt == request.time;
+      allow delete: if isAdmin() && isValidEmailId(email);
     }
   }
 }
