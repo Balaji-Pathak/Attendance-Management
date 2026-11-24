@@ -27,7 +27,6 @@ const MASTER_HEADERS = [
   'Working Hours',
   'Present (P)',
   'Overtime (hrs)',
-  'Thikada (hrs)',
   'Normal Hours (H)',
 ];
 
@@ -48,7 +47,6 @@ const INDIVIDUAL_HEADERS = [
   'Working Hours',
   'Present (P)',
   'Overtime (hrs)',
-  'Thikada (hrs)',
   'Normal Hours (H)',
 ];
 
@@ -147,8 +145,7 @@ function buildMasterRows(records: AttendanceRecord[]): (string | number)[][] {
         r.netDecimalHours !== null ? r.netDecimalHours : '',
         hasOut ? p.presentCount : '',
         hasOut ? p.overtimeDecimalHours : '',
-        p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
-        hasOut ? p.normalDecimalHours : '',
+        hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
       ];
     }),
   ];
@@ -167,7 +164,7 @@ function buildEmployeesRows(employees: Employee[]): (string | number)[][] {
   ];
 }
 
-function getMonthlyThikadaDecimal(employee: Employee, monthFilter?: string): number {
+function getMonthlyThekaDecimal(employee: Employee, monthFilter?: string): number {
   const map = employee.monthlyThikadaMinutes ?? {};
   if (monthFilter) {
     return Number(((map[monthFilter] ?? 0) / 60).toFixed(2));
@@ -196,7 +193,7 @@ function buildIndividualEmployeeRows(
     });
 
   const lastDataRow = empRecords.length > 0 ? 4 + empRecords.length : 5;
-  const monthlyThikadaDec = getMonthlyThikadaDecimal(employee, monthFilter);
+  const monthlyThekaDec = getMonthlyThekaDecimal(employee, monthFilter);
   const periodLabel = monthFilter ? formatMonthLabel(monthFilter) : 'All Months';
 
   const bannerRow1: (string | number)[] = [
@@ -209,20 +206,18 @@ function buildIndividualEmployeeRows(
     'Sunday Rule',
     '100% OT -> H',
     '',
-    '',
   ];
 
   const bannerRow2: (string | number)[] = [
     'Present (P)',
     `=SUM(G5:G${lastDataRow})`,
-    'Monthly Thikada (H)',
-    monthlyThikadaDec,
     'Total Working (H)',
     `=SUM(F5:F${lastDataRow})`,
-    'Total OT (H)',
-    `=SUM(H5:H${lastDataRow})`,
+    'Theka Deduct (H)',
+    monthlyThekaDec,
     'Net Normal Hours (H)',
-    `=MAX(0, SUM(J5:J${lastDataRow})-D2)`,
+    `=MAX(0, SUM(I5:I${lastDataRow})-F2)`,
+    '',
   ];
 
   const dataRows = empRecords.map((r) => {
@@ -237,8 +232,7 @@ function buildIndividualEmployeeRows(
       r.netDecimalHours !== null ? r.netDecimalHours : '',
       hasOut ? p.presentCount : '',
       hasOut ? p.overtimeDecimalHours : '',
-      p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
-      hasOut ? p.normalDecimalHours : '',
+      hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
     ];
   });
 
@@ -251,8 +245,9 @@ function buildIndividualEmployeeRows(
   ];
 
   if (empRecords.length > 0) {
+    const totalRowIdx = lastDataRow + 1;
     rows.push([
-      'TOTAL',
+      'TOTAL (Before Theka)',
       `=COUNTA(A5:A${lastDataRow}) & " Days"`,
       '',
       '',
@@ -260,8 +255,29 @@ function buildIndividualEmployeeRows(
       `=SUM(F5:F${lastDataRow})`,
       `=SUM(G5:G${lastDataRow})`,
       `=SUM(H5:H${lastDataRow})`,
-      `=SUM(I5:I${lastDataRow})+D2`,
-      `=MAX(0, SUM(J5:J${lastDataRow})-D2)`,
+      `=SUM(I5:I${lastDataRow})`,
+    ]);
+    rows.push([
+      'Less: Theka Work (H)',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      `=-F2`,
+    ]);
+    rows.push([
+      'NET PAYABLE',
+      '',
+      '',
+      '',
+      '',
+      `=F${totalRowIdx}`,
+      `=G${totalRowIdx}`,
+      `=H${totalRowIdx}`,
+      `=MAX(0, I${totalRowIdx}-F2)`,
     ]);
   }
 
@@ -279,7 +295,7 @@ async function formatSheetHeaders(
     const isIndividual = s.title !== MASTER_TAB_NAME && s.title !== EMPLOYEES_TAB_NAME;
     const headerRowIndex = isIndividual ? 3 : 0;
     const freezeCount = isIndividual ? 4 : 1;
-    const colCount = isIndividual ? 10 : s.title === MASTER_TAB_NAME ? 12 : 5;
+    const colCount = isIndividual ? 9 : s.title === MASTER_TAB_NAME ? 11 : 5;
 
     requests.push({
       updateSheetProperties: {
@@ -322,7 +338,7 @@ async function formatSheetHeaders(
             startRowIndex: 0,
             endRowIndex: 2,
             startColumnIndex: 0,
-            endColumnIndex: 10,
+            endColumnIndex: 9,
           },
           cell: {
             userEnteredFormat: {
@@ -609,7 +625,7 @@ export async function createOrUpdateStandaloneEmployeeSheet(
         await formatSheetHeaders(token, meta.spreadsheetId, addedMeta);
       }
 
-      const rangesToClear = [`'${firstTab}'!A1:J5000`];
+      const rangesToClear = [`'${firstTab}'!A1:I5000`];
       const dataUpdates = [
         {
           range: `'${firstTab}'!A1`,
@@ -618,7 +634,7 @@ export async function createOrUpdateStandaloneEmployeeSheet(
       ];
 
       if (monthTabTitle && monthTabTitle !== firstTab) {
-        rangesToClear.push(`'${monthTabTitle}'!A1:J5000`);
+        rangesToClear.push(`'${monthTabTitle}'!A1:I5000`);
         dataUpdates.push({
           range: `'${monthTabTitle}'!A1`,
           values: buildIndividualEmployeeRows(employee, records, monthFilter),

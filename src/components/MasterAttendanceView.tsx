@@ -99,7 +99,6 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         'Working Hours',
         'Present (P)',
         'Overtime (hrs)',
-        'Thikada (hrs)',
         'Normal Hours (H)',
       ],
       filteredRecords.map((r) => {
@@ -116,8 +115,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           r.netDecimalHours !== null ? r.netDecimalHours : '',
           hasOut ? p.presentCount : '',
           hasOut ? p.overtimeDecimalHours : '',
-          p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
-          hasOut ? p.normalDecimalHours : '',
+          hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
         ];
       })
     );
@@ -142,8 +140,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       editing.outTime,
       editing.breakMinutes,
       editing.date,
-      Math.round((editing.pausedTotalSeconds ?? 0) / 60),
-      editing.thikadaMinutes ?? 0
+      Math.round((editing.pausedTotalSeconds ?? 0) / 60)
     );
   }, [editing]);
 
@@ -281,7 +278,6 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Working (-30m)</th>
                   <th className="px-4 py-3 text-center whitespace-nowrap">P</th>
-                  <th className="px-4 py-3 text-right whitespace-nowrap">Thikada</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Normal (H)</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-right whitespace-nowrap">Admin</th>
@@ -292,6 +288,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   const p = getRecordPayroll(rec);
                   const awayMins = Math.round((rec.pausedTotalSeconds ?? 0) / 60);
                   const hasOut = Boolean(rec.outTime && rec.netMinutes !== null);
+                  const dayNormalHrs = Number((p.grossNormalMinutes / 60).toFixed(2));
 
                   return (
                     <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
@@ -334,14 +331,9 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                           '—'
                         )}
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
-                        {p.thikadaDecimalHours > 0 ? `-${p.thikadaDecimalHours.toFixed(2)}h` : '—'}
-                      </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
-                        {hasOut && p.normalMinutes > 0 ? (
-                          <span className="text-amber-700">
-                            {p.normalDecimalHours.toFixed(2)}h
-                          </span>
+                        {hasOut && dayNormalHrs > 0 ? (
+                          <span className="text-amber-700">{dayNormalHrs.toFixed(2)}h</span>
                         ) : (
                           <span className="text-slate-400">0.00h</span>
                         )}
@@ -445,7 +437,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700">In Time</label>
                   <input
@@ -458,35 +450,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700">
-                    Out Time
+                    Out Time (blank = On Duty)
                   </label>
                   <input
                     type="time"
                     value={editing.outTime ?? ''}
                     onChange={(e) =>
                       setEditing({ ...editing, outTime: e.target.value || null })
-                    }
-                    className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700">
-                    Thikada (hrs)
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={24}
-                    step={0.25}
-                    value={Number(((editing.thikadaMinutes ?? 0) / 60).toFixed(2))}
-                    onChange={(e) =>
-                      setEditing({
-                        ...editing,
-                        thikadaMinutes: Math.max(
-                          0,
-                          Math.round((Number(e.target.value) || 0) * 60)
-                        ),
-                      })
                     }
                     className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums"
                   />
@@ -510,9 +480,6 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                         : editPreview.netMinutes < 480
                         ? '<8h Shift -> Normal Hours (H)'
                         : 'Overtime (>8h) -> Normal Hours (H)'}
-                      {editPreview.thikadaMinutes > 0
-                        ? ` (-${editPreview.thikadaDecimalHours.toFixed(2)}h Thikada)`
-                        : ''}
                     </span>
                     <span className="font-mono font-semibold text-amber-800 tabular-nums">
                       H: {editPreview.normalDecimalHours.toFixed(2)}h

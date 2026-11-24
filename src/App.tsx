@@ -802,7 +802,7 @@ export default function App() {
         ? `Update ${employee.name}'s Individual Google Sheet?`
         : `Create Individual Google Sheet for ${employee.name}?`,
       description: monthLabel
-        ? `Creates or updates the "${monthLabel}" monthly table (Present P, Normal Hours H, Thikada deductions) and refreshes the main Attendance tab.`
+        ? `Creates or updates the "${monthLabel}" monthly table (Present P, Normal Hours H, Theka deductions) and refreshes the main Attendance tab.`
         : isUpdate
         ? `Update the standalone Google Sheet for ${employee.name} with their attendance records.`
         : `Create a dedicated standalone Google Sheet file in Google Drive for ${employee.name} (${employee.empCode}).`,
@@ -1042,7 +1042,7 @@ export default function App() {
     upsertLocalEmployee(updatedEmp);
     setNotice({
       type: 'success',
-      message: `Applied ${(thikadaMinutes / 60).toFixed(2)}h Thikada deduction for ${formatMonthLabel(yearMonth)}.`,
+      message: `Applied ${(thikadaMinutes / 60).toFixed(2)}h Theka deduction for ${formatMonthLabel(yearMonth)}.`,
     });
   };
 

@@ -17,7 +17,6 @@ import {
   calculateShiftMetrics,
   downloadCSV,
   formatDisplayTime,
-  formatDurationHM,
   formatMonthLabel,
   getDayNameShort,
   getEmployeeSheetTabName,
@@ -56,7 +55,6 @@ interface MonthBuilderRow {
   inTime: string;
   outTime: string;
   awayMinutes: number;
-  thikadaHours: number;
 }
 
 function getPreviousYearMonth(): string {
@@ -92,8 +90,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   // History Attendance Modal state
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [historyMonth, setHistoryMonth] = useState<string>(() => getCurrentYearMonth());
-  const [monthlyThikadaHoursInput, setMonthlyThikadaHoursInput] = useState<string>('0');
-  const [savingMonthlyThikada, setSavingMonthlyThikada] = useState(false);
+  const [monthlyThekaHoursInput, setMonthlyThekaHoursInput] = useState<string>('0');
+  const [savingMonthlyTheka, setSavingMonthlyTheka] = useState(false);
   const [editingRow, setEditingRow] = useState<AttendanceRecord | null>(null);
   const [savingRowEdit, setSavingRowEdit] = useState(false);
 
@@ -103,7 +101,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const [defaultInTime, setDefaultInTime] = useState('09:00');
   const [defaultOutTime, setDefaultOutTime] = useState('17:30');
   const [defaultAwayMins, setDefaultAwayMins] = useState(0);
-  const [defaultThikadaHours, setDefaultThikadaHours] = useState(0);
   const [includeSundays, setIncludeSundays] = useState(false);
   const [builderRows, setBuilderRows] = useState<MonthBuilderRow[]>([]);
   const [syncBuilderToSheet, setSyncBuilderToSheet] = useState(true);
@@ -123,7 +120,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       });
   }, [records, selectedEmployee]);
 
-  // Group saved records by YYYY-MM for clean Overview cards (no giant raw table below)
+  // Group saved records by YYYY-MM for clean Overview rows
   const savedMonthSummaries = useMemo(() => {
     if (!selectedEmployee) return [];
     const byMonth = new Map<string, AttendanceRecord[]>();
@@ -141,8 +138,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       let netMinutes = 0;
       let presentCount = 0;
       let overtimeMinutes = 0;
-      let dayThikadaMinutes = 0;
-      let grossNormalBeforeDayThikada = 0;
+      let grossNormalMinutes = 0;
 
       for (const r of list) {
         if (r.outTime && r.netMinutes !== null) {
@@ -150,14 +146,12 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           const p = getRecordPayroll(r);
           presentCount += p.presentCount;
           overtimeMinutes += p.overtimeMinutes;
-          dayThikadaMinutes += p.thikadaMinutes;
-          grossNormalBeforeDayThikada += p.grossNormalMinutes;
+          grossNormalMinutes += p.grossNormalMinutes;
         }
       }
 
-      const monthThikadaMinutes = selectedEmployee.monthlyThikadaMinutes?.[ym] ?? 0;
-      const totalThikadaMinutes = dayThikadaMinutes + monthThikadaMinutes;
-      const netNormalMinutes = Math.max(0, grossNormalBeforeDayThikada - totalThikadaMinutes);
+      const monthThekaMinutes = selectedEmployee.monthlyThikadaMinutes?.[ym] ?? 0;
+      const netNormalMinutes = Math.max(0, grossNormalMinutes - monthThekaMinutes);
 
       return {
         yearMonth: ym,
@@ -167,7 +161,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         netMinutes,
         netDecimal: Number((netMinutes / 60).toFixed(2)),
         overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
-        totalThikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
+        thekaDecimal: Number((monthThekaMinutes / 60).toFixed(2)),
         netNormalMinutes,
         netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
       };
@@ -177,20 +171,20 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const overallSummary = useMemo(() => {
     let presentCount = 0;
     let netMinutes = 0;
-    let totalThikadaMinutes = 0;
+    let totalThekaMinutes = 0;
     let netNormalMinutes = 0;
 
     for (const m of savedMonthSummaries) {
       presentCount += m.presentCount;
       netMinutes += m.netMinutes;
-      totalThikadaMinutes += Math.round(m.totalThikadaDecimal * 60);
+      totalThekaMinutes += Math.round(m.thekaDecimal * 60);
       netNormalMinutes += m.netNormalMinutes;
     }
 
     return {
       presentCount,
       netDecimal: Number((netMinutes / 60).toFixed(2)),
-      thikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
+      thekaDecimal: Number((totalThekaMinutes / 60).toFixed(2)),
       netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
       monthsCount: savedMonthSummaries.length,
     };
@@ -212,8 +206,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     let netMinutes = 0;
     let presentCount = 0;
     let overtimeMinutes = 0;
-    let dayThikadaMinutes = 0;
-    let grossNormalBeforeDayThikada = 0;
+    let grossNormalMinutes = 0;
 
     for (const r of historyMonthRecords) {
       totalAwayMins += Math.round((r.pausedTotalSeconds ?? 0) / 60);
@@ -222,18 +215,12 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         const p = getRecordPayroll(r);
         presentCount += p.presentCount;
         overtimeMinutes += p.overtimeMinutes;
-        dayThikadaMinutes += p.thikadaMinutes;
-        grossNormalBeforeDayThikada += p.grossNormalMinutes;
+        grossNormalMinutes += p.grossNormalMinutes;
       }
     }
 
-    const monthlyThikadaMinutes = selectedEmployee?.monthlyThikadaMinutes?.[historyMonth] ?? 0;
-    const totalThikadaMinutes = dayThikadaMinutes + monthlyThikadaMinutes;
-    const dayNetNormalTotal = historyMonthRecords.reduce(
-      (sum, r) => sum + (r.outTime && r.netMinutes !== null ? getRecordPayroll(r).normalMinutes : 0),
-      0
-    );
-    const finalNetNormalMinutes = Math.max(0, dayNetNormalTotal - monthlyThikadaMinutes);
+    const monthlyThekaMinutes = selectedEmployee?.monthlyThikadaMinutes?.[historyMonth] ?? 0;
+    const finalNetNormalMinutes = Math.max(0, grossNormalMinutes - monthlyThekaMinutes);
 
     return {
       entries: historyMonthRecords.length,
@@ -243,22 +230,19 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       presentCount,
       overtimeMinutes,
       overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
-      dayThikadaMinutes,
-      dayThikadaDecimal: Number((dayThikadaMinutes / 60).toFixed(2)),
-      monthlyThikadaMinutes,
-      monthlyThikadaDecimal: Number((monthlyThikadaMinutes / 60).toFixed(2)),
-      totalThikadaDecimal: Number((totalThikadaMinutes / 60).toFixed(2)),
-      grossNormalDecimal: Number((grossNormalBeforeDayThikada / 60).toFixed(2)),
+      monthlyThekaMinutes,
+      monthlyThekaDecimal: Number((monthlyThekaMinutes / 60).toFixed(2)),
+      grossNormalDecimal: Number((grossNormalMinutes / 60).toFixed(2)),
       finalNetNormalMinutes,
       finalNetNormalDecimal: Number((finalNetNormalMinutes / 60).toFixed(2)),
     };
   }, [historyMonthRecords, selectedEmployee, historyMonth]);
 
-  // Sync monthly thikada input whenever history modal month/employee changes
+  // Sync monthly Theka input whenever history modal month/employee changes
   useEffect(() => {
     if (!selectedEmployee) return;
     const mins = selectedEmployee.monthlyThikadaMinutes?.[historyMonth] ?? 0;
-    setMonthlyThikadaHoursInput(String(Number((mins / 60).toFixed(2))));
+    setMonthlyThekaHoursInput(String(Number((mins / 60).toFixed(2))));
     setEditingRow(null);
   }, [selectedEmployee, historyMonth, showHistoryModal]);
 
@@ -288,7 +272,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             inTime: existing.inTime,
             outTime: existing.outTime || defaultOutTime,
             awayMinutes: Math.round((existing.pausedTotalSeconds ?? 0) / 60),
-            thikadaHours: Number(((existing.thikadaMinutes ?? 0) / 60).toFixed(2)),
           };
         }
         return {
@@ -299,7 +282,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           inTime: defaultInTime,
           outTime: defaultOutTime,
           awayMinutes: defaultAwayMins,
-          thikadaHours: defaultThikadaHours,
         };
       })
     );
@@ -321,7 +303,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         inTime: defaultInTime,
         outTime: defaultOutTime,
         awayMinutes: defaultAwayMins,
-        thikadaHours: defaultThikadaHours,
       }))
     );
   };
@@ -332,7 +313,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         selectedDays: 0,
         presentCount: 0,
         netMinutes: 0,
-        thikadaMinutes: 0,
         normalMinutes: 0,
       };
     }
@@ -340,7 +320,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     let selectedDays = 0;
     let presentCount = 0;
     let netMinutes = 0;
-    let thikadaMinutes = 0;
     let normalMinutes = 0;
 
     for (const row of builderRows) {
@@ -350,16 +329,14 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         row.outTime,
         breakMins,
         row.date,
-        row.awayMinutes,
-        Math.round(Math.max(0, row.thikadaHours) * 60)
+        row.awayMinutes
       );
       selectedDays += 1;
       presentCount += calc.presentCount;
       netMinutes += calc.netMinutes;
-      thikadaMinutes += calc.thikadaMinutes;
       normalMinutes += calc.normalMinutes;
     }
-    return { selectedDays, presentCount, netMinutes, thikadaMinutes, normalMinutes };
+    return { selectedDays, presentCount, netMinutes, normalMinutes };
   }, [builderRows, selectedEmployee]);
 
   const handleSaveBuilderMonth = async () => {
@@ -369,14 +346,12 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
     for (const row of builderRows) {
       if (!row.present || !row.inTime || !row.outTime) continue;
-      const thikadaMins = Math.round(Math.max(0, row.thikadaHours) * 60);
       const calc = calculateShiftMetrics(
         row.inTime,
         row.outTime,
         breakMins,
         row.date,
-        row.awayMinutes,
-        thikadaMins
+        row.awayMinutes
       );
       builtRecords.push({
         id: `${row.date}_${selectedEmployee.id}`,
@@ -397,7 +372,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         overtimeMinutes: calc.overtimeMinutes,
         overtimeDecimalHours: calc.overtimeDecimalHours,
         presentCount: calc.presentCount,
-        thikadaMinutes: calc.thikadaMinutes,
+        thikadaMinutes: 0,
         normalMinutes: calc.normalMinutes,
         normalDecimalHours: calc.normalDecimalHours,
         isSunday: calc.isSunday,
@@ -440,27 +415,77 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     if (!editingRow) return;
     setSavingRowEdit(true);
     try {
-      await onUpdateSingleRecord(editingRow);
+      await onUpdateSingleRecord({ ...editingRow, thikadaMinutes: 0 });
       setEditingRow(null);
     } finally {
       setSavingRowEdit(false);
     }
   };
 
-  const handleSaveMonthlyThikadaClick = async () => {
+  const handleSaveMonthlyThekaClick = async () => {
     if (!selectedEmployee || !historyMonth) return;
-    const hrs = Math.max(0, Number(monthlyThikadaHoursInput) || 0);
+    const hrs = Math.max(0, Number(monthlyThekaHoursInput) || 0);
     const mins = Math.round(hrs * 60);
-    setSavingMonthlyThikada(true);
+    setSavingMonthlyTheka(true);
     try {
       await onSaveMonthlyThikada(selectedEmployee, historyMonth, mins);
     } finally {
-      setSavingMonthlyThikada(false);
+      setSavingMonthlyTheka(false);
     }
   };
 
   const handleExportMonthCSV = (month: string, rows: AttendanceRecord[]) => {
     if (!selectedEmployee) return;
+    const csvRows: (string | number)[][] = rows.map((r) => {
+      const p = getRecordPayroll(r);
+      const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+      return [
+        r.date,
+        getDayNameShort(r.date),
+        formatDisplayTime(r.inTime),
+        r.outTime ? formatDisplayTime(r.outTime) : '',
+        Math.round((r.pausedTotalSeconds ?? 0) / 60),
+        r.netDecimalHours !== null ? r.netDecimalHours : '',
+        hasOut ? p.presentCount : '',
+        hasOut ? p.overtimeDecimalHours : '',
+        hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
+      ];
+    });
+
+    csvRows.push([
+      'TOTAL (Before Theka)',
+      `${historyTotals.entries} Days`,
+      '',
+      '',
+      historyTotals.totalAwayMins,
+      historyTotals.netDecimal,
+      historyTotals.presentCount,
+      historyTotals.overtimeDecimal,
+      historyTotals.grossNormalDecimal,
+    ]);
+    csvRows.push([
+      'Less: Theka Work (H)',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      -historyTotals.monthlyThekaDecimal,
+    ]);
+    csvRows.push([
+      'NET PAYABLE',
+      '',
+      '',
+      '',
+      '',
+      historyTotals.netDecimal,
+      historyTotals.presentCount,
+      historyTotals.overtimeDecimal,
+      historyTotals.finalNetNormalDecimal,
+    ]);
+
     downloadCSV(
       `${selectedEmployee.empCode}-${selectedEmployee.name.replace(/\s+/g, '-')}-${month}.csv`,
       [
@@ -472,25 +497,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         'Working Hours',
         'Present (P)',
         'Overtime (hrs)',
-        'Thikada (hrs)',
         'Normal Hours (H)',
       ],
-      rows.map((r) => {
-        const p = getRecordPayroll(r);
-        const hasOut = Boolean(r.outTime && r.netMinutes !== null);
-        return [
-          r.date,
-          getDayNameShort(r.date),
-          formatDisplayTime(r.inTime),
-          r.outTime ? formatDisplayTime(r.outTime) : '',
-          Math.round((r.pausedTotalSeconds ?? 0) / 60),
-          r.netDecimalHours !== null ? r.netDecimalHours : '',
-          hasOut ? p.presentCount : '',
-          hasOut ? p.overtimeDecimalHours : '',
-          p.thikadaDecimalHours > 0 ? p.thikadaDecimalHours : 0,
-          hasOut ? p.normalDecimalHours : '',
-        ];
-      })
+      csvRows
     );
   };
 
@@ -572,7 +581,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
               </h2>
               <p className="mt-1 text-xs text-slate-500">
                 8h+ Mon–Sat = 1 Present (P) · &lt;8h, Overtime (&gt;8h) &amp; Sunday = Normal Hours
-                (H) · Thikada deducted from H
+                (H) · Month-end Theka deducted from H
               </p>
             </div>
 
@@ -675,7 +684,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   <p className="mt-0.5 text-xs text-slate-600">
                     Paste a Google Sheet URL or ID containing Date, In Time, and Out Time columns.
                     GateLog extracts Present (P) for 8h+ shifts, routes &lt;8h &amp; overtime/Sunday
-                    hours into Normal Hours (H), deducts any Thikada column, and saves to history.
+                    hours into Normal Hours (H), and saves to history.
                   </p>
                 </div>
                 <button
@@ -730,9 +739,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
-            <div className="text-xs font-medium text-slate-500">Thikada Deducted</div>
+            <div className="text-xs font-medium text-slate-500">Theka Deducted</div>
             <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-700 tabular-nums">
-              {overallSummary.thikadaDecimal.toFixed(2)}h
+              {overallSummary.thekaDecimal.toFixed(2)}h
             </div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
@@ -743,15 +752,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           </div>
         </section>
 
-        {/* Clean Monthly Overview (Individual daily rows open via History Attendance button) */}
+        {/* Clean Monthly Overview (Daily records open via History Attendance button) */}
         <section className="rounded-xl border border-slate-200 bg-white">
           <div className="border-b border-slate-200 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">Saved Monthly Summaries</h3>
               <p className="mt-0.5 text-xs text-slate-500">
                 Click <span className="font-medium text-slate-700">History Attendance</span> to
-                inspect any month&apos;s day-by-day sheet, deduct Thikada hours, or export to Google
-                Sheets.
+                inspect any month&apos;s day-by-day sheet, deduct month-end Theka working hours, or
+                export to Google Sheets.
               </p>
             </div>
             <button
@@ -780,7 +789,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     <th className="px-4 py-3 text-center whitespace-nowrap">Present (P)</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Overtime</th>
-                    <th className="px-4 py-3 text-right whitespace-nowrap">Thikada Deducted</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">Theka Deducted</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Net Normal (H)</th>
                     <th className="px-6 py-3 text-right whitespace-nowrap">Action</th>
                   </tr>
@@ -804,9 +813,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         {m.overtimeDecimal.toFixed(2)}h
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
-                        {m.totalThikadaDecimal > 0
-                          ? `-${m.totalThikadaDecimal.toFixed(2)}h`
-                          : '0.00h'}
+                        {m.thekaDecimal > 0 ? `-${m.thekaDecimal.toFixed(2)}h` : '0.00h'}
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-amber-700 tabular-nums whitespace-nowrap">
                         {m.netNormalDecimal.toFixed(2)}h
@@ -861,8 +868,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   History Attendance — {selectedEmployee.name} ({selectedEmployee.empCode})
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  Select a month to view records, edit Thikada deductions, or create this month&apos;s
-                  Google Sheet.
+                  Select a month to view records, deduct month-end Theka working hours, or create
+                  this month&apos;s Google Sheet.
                 </p>
               </div>
               <button
@@ -940,7 +947,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
               </div>
             ) : (
               <>
-                {/* Monthly Summary + Thikada Deduction Control */}
+                {/* Monthly Summary + Month-End Theka Deduction Control */}
                 <div className="border-b border-slate-200 bg-white px-6 py-4 grid grid-cols-1 gap-4 md:grid-cols-12 items-center">
                   <div className="md:col-span-7 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
@@ -950,15 +957,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       </div>
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-slate-500">Gross Normal (H)</div>
+                      <div className="text-slate-500">Normal (H)</div>
                       <div className="mt-0.5 font-mono text-base font-semibold text-slate-800 tabular-nums">
                         {historyTotals.grossNormalDecimal.toFixed(2)}h
                       </div>
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-slate-500">Total Thikada</div>
+                      <div className="text-slate-500">Theka Deduct</div>
                       <div className="mt-0.5 font-mono text-base font-semibold text-slate-700 tabular-nums">
-                        -{historyTotals.totalThikadaDecimal.toFixed(2)}h
+                        -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
                       </div>
                     </div>
                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
@@ -971,7 +978,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
                   <div className="md:col-span-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <div className="text-[11px] font-semibold text-slate-800">
-                      Deduct Monthly Thikada Hours (from Normal Hours H)
+                      Month-End Theka Working Hours (Deducted from H)
                     </div>
                     <div className="mt-2 flex items-center gap-2">
                       <input
@@ -979,25 +986,25 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         min={0}
                         max={744}
                         step={0.25}
-                        value={monthlyThikadaHoursInput}
-                        onChange={(e) => setMonthlyThikadaHoursInput(e.target.value)}
-                        aria-label="Monthly Thikada hours deduction"
+                        value={monthlyThekaHoursInput}
+                        onChange={(e) => setMonthlyThekaHoursInput(e.target.value)}
+                        aria-label="Month-end Theka working hours deduction"
                         className="w-28 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
                       />
                       <span className="text-xs text-slate-500">hrs</span>
                       <button
                         type="button"
-                        onClick={handleSaveMonthlyThikadaClick}
-                        disabled={savingMonthlyThikada}
+                        onClick={handleSaveMonthlyThekaClick}
+                        disabled={savingMonthlyTheka}
                         className="ml-auto rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-300 whitespace-nowrap"
                       >
-                        {savingMonthlyThikada ? 'Saving...' : 'Apply Thikada'}
+                        {savingMonthlyTheka ? 'Saving...' : 'Apply Theka'}
                       </button>
                     </div>
                   </div>
                 </div>
 
-                {/* Day-by-Day Monthly Table */}
+                {/* Day-by-Day Monthly Table (Clean, without daily Theka clutter) */}
                 <div className="flex-1 overflow-auto">
                   <table className="w-full border-collapse text-left text-xs">
                     <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-500 z-10">
@@ -1014,9 +1021,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         </th>
                         <th className="px-3 py-2.5 font-medium text-center whitespace-nowrap">P</th>
                         <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">OT</th>
-                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
-                          Thikada
-                        </th>
                         <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
                           Normal (H)
                         </th>
@@ -1040,13 +1044,14 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                                 editingRow.outTime,
                                 editingRow.breakMinutes,
                                 editingRow.date,
-                                awayMins,
-                                editingRow.thikadaMinutes ?? 0
+                                awayMins
                               )
                             : null;
 
                         const p = getRecordPayroll(r);
-                        const hasOut = Boolean(activeRow.outTime && (previewCalc || r.netMinutes !== null));
+                        const hasOut = Boolean(
+                          activeRow.outTime && (previewCalc || r.netMinutes !== null)
+                        );
                         const displayNet = previewCalc
                           ? previewCalc.netDecimalHours
                           : r.netDecimalHours;
@@ -1054,12 +1059,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         const displayOT = previewCalc
                           ? previewCalc.overtimeDecimalHours
                           : p.overtimeDecimalHours;
-                        const displayThikada = previewCalc
-                          ? previewCalc.thikadaDecimalHours
-                          : p.thikadaDecimalHours;
                         const displayNormal = previewCalc
                           ? previewCalc.normalDecimalHours
-                          : p.normalDecimalHours;
+                          : Number((p.grossNormalMinutes / 60).toFixed(2));
 
                         return (
                           <tr
@@ -1155,35 +1157,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             <td className="px-3 py-2.5 text-right font-mono text-slate-700 tabular-nums whitespace-nowrap">
                               {hasOut ? `${displayOT.toFixed(2)}h` : '—'}
                             </td>
-                            <td className="px-3 py-2.5 text-right font-mono tabular-nums whitespace-nowrap">
-                              {isEditingThis && editingRow ? (
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={24}
-                                  step={0.25}
-                                  value={Number(
-                                    ((editingRow.thikadaMinutes ?? 0) / 60).toFixed(2)
-                                  )}
-                                  onChange={(e) =>
-                                    setEditingRow({
-                                      ...editingRow,
-                                      thikadaMinutes: Math.max(
-                                        0,
-                                        Math.round((Number(e.target.value) || 0) * 60)
-                                      ),
-                                    })
-                                  }
-                                  className="w-16 rounded border border-slate-300 bg-white px-1.5 py-1 text-right font-mono text-xs"
-                                />
-                              ) : displayThikada > 0 ? (
-                                <span className="text-slate-700">
-                                  -{displayThikada.toFixed(2)}h
-                                </span>
-                              ) : (
-                                <span className="text-slate-400">0</span>
-                              )}
-                            </td>
                             <td className="px-3 py-2.5 text-right font-mono font-semibold tabular-nums whitespace-nowrap">
                               {hasOut && displayNormal > 0 ? (
                                 <span className="text-amber-700">{displayNormal.toFixed(2)}h</span>
@@ -1232,32 +1205,51 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     </tbody>
                     <tfoot>
                       <tr className="border-t-2 border-slate-200 bg-slate-50 font-mono text-xs font-semibold text-slate-900">
-                        <td className="px-4 py-3 whitespace-nowrap">TOTAL</td>
-                        <td className="px-3 py-3 whitespace-nowrap text-slate-700">
+                        <td className="px-4 py-2.5 whitespace-nowrap">TOTAL</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-slate-700">
                           {historyTotals.entries} Days
                         </td>
-                        <td className="px-3 py-3" />
-                        <td className="px-3 py-3" />
-                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-600">
+                        <td className="px-3 py-2.5" />
+                        <td className="px-3 py-2.5" />
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-slate-600">
                           {historyTotals.totalAwayMins}m
                         </td>
-                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-teal-800">
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-teal-800">
                           {historyTotals.netDecimal.toFixed(2)}h
                         </td>
-                        <td className="px-3 py-3 text-center tabular-nums whitespace-nowrap text-teal-900">
+                        <td className="px-3 py-2.5 text-center tabular-nums whitespace-nowrap text-teal-900">
                           {historyTotals.presentCount} P
                         </td>
-                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-700">
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-slate-700">
                           {historyTotals.overtimeDecimal.toFixed(2)}h
                         </td>
-                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-slate-700">
-                          -{historyTotals.totalThikadaDecimal.toFixed(2)}h
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-slate-900">
+                          {historyTotals.grossNormalDecimal.toFixed(2)}h
                         </td>
-                        <td className="px-3 py-3 text-right tabular-nums whitespace-nowrap text-amber-800">
+                        <td className="px-3 py-2.5" />
+                        <td className="px-4 py-2.5" />
+                      </tr>
+                      <tr className="border-t border-slate-200 bg-white font-mono text-xs text-slate-700">
+                        <td colSpan={8} className="px-4 py-2 text-right font-sans font-medium">
+                          Less: Month-End Theka Working Hours
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap font-semibold text-red-700">
+                          -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
+                        </td>
+                        <td colSpan={2} />
+                      </tr>
+                      <tr className="border-t border-slate-300 bg-amber-50/70 font-mono text-xs font-bold text-slate-900">
+                        <td colSpan={6} className="px-4 py-2.5 text-right font-sans">
+                          FINAL NET PAYABLE (P &amp; H)
+                        </td>
+                        <td className="px-3 py-2.5 text-center tabular-nums whitespace-nowrap text-teal-900">
+                          {historyTotals.presentCount} P
+                        </td>
+                        <td className="px-3 py-2.5" />
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-amber-800">
                           {historyTotals.finalNetNormalDecimal.toFixed(2)}h
                         </td>
-                        <td className="px-3 py-3" />
-                        <td className="px-4 py-3" />
+                        <td colSpan={2} />
                       </tr>
                     </tfoot>
                   </table>
@@ -1314,7 +1306,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           aria-modal="true"
           aria-labelledby="month-builder-title"
         >
-          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="flex max-h-[92vh] w-full max-w-4xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
                 <h3 id="month-builder-title" className="text-base font-semibold text-slate-900">
@@ -1322,7 +1314,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500">
                   8h+ Mon–Sat counts as 1 Present (P); &lt;8h, extra hours, and Sundays count in
-                  Normal Hours (H) minus Thikada hours.
+                  Normal Hours (H). Month-end Theka deduction can be applied in History Attendance.
                 </p>
               </div>
               <button
@@ -1336,7 +1328,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
 
             <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-7 items-end">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-6 items-end">
                 <div className="col-span-2 sm:col-span-1">
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
                     Month
@@ -1385,22 +1377,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
                   />
                 </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Thikada (hrs)
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={24}
-                    step={0.25}
-                    value={defaultThikadaHours}
-                    onChange={(e) =>
-                      setDefaultThikadaHours(Math.max(0, Number(e.target.value) || 0))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
-                  />
-                </div>
                 <div className="flex items-center gap-2 pb-1.5">
                   <input
                     id="include-sundays-checkbox"
@@ -1438,7 +1414,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     <th className="py-2 px-2 font-medium">In Time</th>
                     <th className="py-2 px-2 font-medium">Out Time</th>
                     <th className="py-2 px-2 font-medium">Away (m)</th>
-                    <th className="py-2 px-2 font-medium">Thikada (h)</th>
                     <th className="py-2 px-2 font-medium text-right">Working</th>
                     <th className="py-2 px-2 font-medium text-center">P</th>
                     <th className="py-2 pl-2 font-medium text-right">Normal (H)</th>
@@ -1453,8 +1428,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             row.outTime,
                             selectedEmployee.breakMinutes || 30,
                             row.date,
-                            row.awayMinutes,
-                            Math.round(Math.max(0, row.thikadaHours) * 60)
+                            row.awayMinutes
                           )
                         : null;
 
@@ -1534,23 +1508,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                             className="w-16 rounded border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
                           />
                         </td>
-                        <td className="py-2 px-2">
-                          <input
-                            type="number"
-                            min={0}
-                            max={24}
-                            step={0.25}
-                            value={row.thikadaHours}
-                            disabled={!row.present}
-                            onChange={(e) => {
-                              const val = Math.max(0, Number(e.target.value) || 0);
-                              setBuilderRows((prev) =>
-                                prev.map((r, i) => (i === idx ? { ...r, thikadaHours: val } : r))
-                              );
-                            }}
-                            className="w-16 rounded border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
-                          />
-                        </td>
                         <td className="py-2 px-2 text-right font-mono font-medium text-slate-900 tabular-nums whitespace-nowrap">
                           {calc ? `${calc.netDecimalHours.toFixed(2)}h` : 'Off'}
                         </td>
@@ -1595,12 +1552,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   <span className="text-slate-500">Working: </span>
                   <span className="font-mono font-semibold text-slate-900 tabular-nums">
                     {(builderTotals.netMinutes / 60).toFixed(2)}h
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-500">Thikada: </span>
-                  <span className="font-mono font-semibold text-slate-700 tabular-nums">
-                    -{(builderTotals.thikadaMinutes / 60).toFixed(2)}h
                   </span>
                 </div>
                 <div>
