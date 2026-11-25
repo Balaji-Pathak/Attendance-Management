@@ -16,7 +16,7 @@ import {
   Employee,
 } from '../types/attendance';
 import {
-  formatCurrencyINR,
+  formatHourlyRateINR,
   getEmployeeHourlyRate,
   normalizeCompanyCategory,
 } from '../utils/time';
@@ -186,14 +186,22 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       return;
     }
 
-    const parsedRate = Number(rateInput);
-    if (rateInput.trim() !== '' && (Number.isNaN(parsedRate) || parsedRate < 0)) {
-      setFormError('Hourly rate must be 0 or a positive number.');
-      return;
+    const cleanRateInput = rateInput.trim();
+    const parsedRate = Number(cleanRateInput);
+    if (cleanRateInput !== '') {
+      if (Number.isNaN(parsedRate) || parsedRate < 0) {
+        setFormError('Hourly rate must be 0 or a positive number.');
+        return;
+      }
+      const decimalPart = cleanRateInput.split('.')[1];
+      if (decimalPart && decimalPart.length > 5) {
+        setFormError('Hourly rate can have at most 5 digits after the decimal point.');
+        return;
+      }
     }
     const cleanRate =
-      rateInput.trim() !== '' && parsedRate > 0
-        ? Math.min(1000000, Number(parsedRate.toFixed(2)))
+      cleanRateInput !== '' && parsedRate > 0
+        ? Math.min(1000000, Number(parsedRate.toFixed(5)))
         : 0;
 
     setFormError(null);
@@ -380,7 +388,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs font-medium tabular-nums whitespace-nowrap">
                         {rate > 0 ? (
-                          <span className="text-slate-900">{formatCurrencyINR(rate)}/hr</span>
+                          <span className="text-slate-900">{formatHourlyRateINR(rate)}/hr</span>
                         ) : (
                           <span className="text-slate-400">Not set</span>
                         )}
@@ -576,13 +584,13 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                     type="number"
                     min={0}
                     max={1000000}
-                    step="0.01"
+                    step="0.00001"
                     value={rateInput}
                     onChange={(e) => {
                       setFormError(null);
                       setRateInput(e.target.value);
                     }}
-                    placeholder="e.g., 75"
+                    placeholder="e.g., 75 or 75.12345"
                     className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm tabular-nums focus:border-teal-700 focus:outline-none"
                   />
                 </div>

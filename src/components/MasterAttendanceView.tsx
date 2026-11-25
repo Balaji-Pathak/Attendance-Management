@@ -15,6 +15,7 @@ import {
   formatDisplayDate,
   formatDisplayTime,
   formatDurationHM,
+  formatHourlyRateINR,
   formatMonthLabel,
   getCurrentYearMonth,
   getDayNameShort,
@@ -525,7 +526,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                         )}
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
-                        {rate > 0 ? formatCurrencyINR(rate) : '—'}
+                        {rate > 0 ? formatHourlyRateINR(rate) : '—'}
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
                         {hasOut && rate > 0 ? (

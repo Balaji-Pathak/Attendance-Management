@@ -24,6 +24,7 @@ import {
   downloadCSV,
   formatCurrencyINR,
   formatDisplayTime,
+  formatHourlyRateINR,
   formatMonthLabel,
   getCurrentYearMonth,
   getDayNameShort,
@@ -796,7 +797,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 <span aria-hidden="true">·</span>
                 <span className="font-mono font-semibold text-slate-800">
                   {selectedEmpRate > 0
-                    ? `Rate: ${formatCurrencyINR(selectedEmpRate)}/hr`
+                    ? `Rate: ${formatHourlyRateINR(selectedEmpRate)}/hr`
                     : 'Rate: Not set'}
                 </span>
               </div>
@@ -1018,7 +1019,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-5 py-4">
               <div className="text-xs font-medium text-emerald-900">
                 Net Payable
-                {selectedEmpRate > 0 ? ` (@ ${formatCurrencyINR(selectedEmpRate)}/hr)` : ''}
+                {selectedEmpRate > 0 ? ` (@ ${formatHourlyRateINR(selectedEmpRate)}/hr)` : ''}
               </div>
               <div className="mt-1.5 font-mono text-2xl font-bold text-emerald-800 tabular-nums">
                 {formatCurrencyINR(overallSummary.netPayable)}
@@ -1259,7 +1260,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       <div className="text-emerald-900 font-semibold">
                         Net Payable
                         {historyTotals.hourlyRate > 0
-                          ? ` (@ ${formatCurrencyINR(historyTotals.hourlyRate)})`
+                          ? ` (@ ${formatHourlyRateINR(historyTotals.hourlyRate)})`
                           : ''}
                       </div>
                       <div className="mt-0.5 font-mono text-base font-bold text-emerald-800 tabular-nums">
@@ -1551,7 +1552,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       </tr>
                       <tr className="border-t border-slate-300 bg-amber-50/70 font-mono text-xs font-bold text-slate-900">
                         <td colSpan={5} className="px-4 py-2.5 text-right font-sans">
-                          FINAL NET PAYABLE (Working × {formatCurrencyINR(selectedEmpRate)}/hr)
+                          FINAL NET PAYABLE (Working × {formatHourlyRateINR(selectedEmpRate)}/hr)
                         </td>
                         <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-teal-800">
                           {historyTotals.netDecimal.toFixed(2)}h

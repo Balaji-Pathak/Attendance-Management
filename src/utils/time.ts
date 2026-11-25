@@ -21,9 +21,17 @@ export function getEmployeeHourlyRate(
 ): number {
   const rate = emp?.hourlyRate;
   if (typeof rate === 'number' && !Number.isNaN(rate) && rate > 0) {
-    return Number(rate.toFixed(2));
+    return Number(rate.toFixed(5));
   }
   return 0;
+}
+
+export function formatHourlyRateINR(rate: number): string {
+  const safe = Number.isFinite(rate) ? rate : 0;
+  return `₹${safe.toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 5,
+  })}`;
 }
 
 export function formatCurrencyINR(amount: number): string {

@@ -72,7 +72,7 @@ function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
     !Number.isNaN(emp.hourlyRate) &&
     emp.hourlyRate >= 0
   ) {
-    payload.hourlyRate = Math.min(1000000, Number(emp.hourlyRate.toFixed(2)));
+    payload.hourlyRate = Math.min(1000000, Number(emp.hourlyRate.toFixed(5)));
   }
 
   if (emp.individualSheetId && emp.individualSheetId.trim()) {
@@ -491,7 +491,7 @@ export function subscribeAllEmployees(
             breakMinutes: typeof data.breakMinutes === 'number' ? data.breakMinutes : 30,
             hourlyRate:
               typeof data.hourlyRate === 'number' && !Number.isNaN(data.hourlyRate) && data.hourlyRate >= 0
-                ? Number(data.hourlyRate.toFixed(2))
+                ? Number(data.hourlyRate.toFixed(5))
                 : 0,
             active: data.active !== false,
             individualSheetId: data.individualSheetId

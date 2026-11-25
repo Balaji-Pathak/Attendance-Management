@@ -441,6 +441,7 @@ async function formatSheetHeaders(
     });
 
     if (s.title === MASTER_TAB_NAME) {
+      // Format Hourly Rate (Col M) up to 5 decimals and Payable Amount (Col N) to 2 decimals
       requests.push({
         repeatCell: {
           range: {
@@ -448,6 +449,23 @@ async function formatSheetHeaders(
             startRowIndex: 1,
             endRowIndex: 2000,
             startColumnIndex: 12,
+            endColumnIndex: 13,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00###' },
+            },
+          },
+          fields: 'userEnteredFormat.numberFormat',
+        },
+      });
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 2000,
+            startColumnIndex: 13,
             endColumnIndex: 14,
           },
           cell: {
@@ -470,7 +488,7 @@ async function formatSheetHeaders(
           },
           cell: {
             userEnteredFormat: {
-              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00###' },
             },
           },
           fields: 'userEnteredFormat.numberFormat',
@@ -498,7 +516,7 @@ async function formatSheetHeaders(
         },
       });
 
-      // Format H1 (Hourly Rate) cleanly
+      // Format H1 (Hourly Rate) cleanly up to 5 decimal digits
       requests.push({
         repeatCell: {
           range: {
@@ -510,7 +528,7 @@ async function formatSheetHeaders(
           },
           cell: {
             userEnteredFormat: {
-              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00###' },
             },
           },
           fields: 'userEnteredFormat.numberFormat',
@@ -1542,7 +1560,7 @@ export async function loadWorkbookData(
           ).trim();
           const rateRaw = rateIdx !== -1 ? Number(row[rateIdx]) : 0;
           const hourlyRate =
-            !Number.isNaN(rateRaw) && rateRaw > 0 ? Number(rateRaw.toFixed(2)) : 0;
+            !Number.isNaN(rateRaw) && rateRaw > 0 ? Number(rateRaw.toFixed(5)) : 0;
           const activeRaw = String(
             (statusIdx !== -1 ? row[statusIdx] : hasCompanyCol ? row[4] : row[3]) || 'Active'
           ).toLowerCase();
