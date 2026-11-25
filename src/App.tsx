@@ -577,8 +577,28 @@ export default function App() {
   };
 
   const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
+    const trimmedCode = emp.empCode.trim();
+    if (!trimmedCode) {
+      const msg = 'Employee ID is required.';
+      setNotice({ type: 'error', message: msg });
+      throw new Error(msg);
+    }
+
+    const activeConflict = employees.find(
+      (e) =>
+        e.id !== emp.id &&
+        e.active &&
+        e.empCode.trim().toLowerCase() === trimmedCode.toLowerCase()
+    );
+    if (activeConflict) {
+      const msg = `Employee ID "${trimmedCode}" is already assigned to active employee ${activeConflict.name}. You can only reuse an Employee ID if that employee is Inactive.`;
+      setNotice({ type: 'error', message: msg });
+      throw new Error(msg);
+    }
+
     const normalizedEmp: Employee = {
       ...emp,
+      empCode: trimmedCode,
       companyCategory: normalizeCompanyCategory(emp.companyCategory),
     };
     const prevEmp = employees.find((e) => e.id === normalizedEmp.id);

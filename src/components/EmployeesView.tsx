@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Edit3, ExternalLink, Plus, UserPlus, X } from 'lucide-react';
+import { AlertCircle, Edit3, ExternalLink, Plus, UserPlus, X } from 'lucide-react';
 import {
   COMPANY_CATEGORIES,
   CompanyCategory,
@@ -27,6 +27,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   } | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<'all' | CompanyCategory>('all');
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [tableAlert, setTableAlert] = useState<string | null>(null);
 
   const categoryCounts = useMemo(() => {
     let permanent = 0;
@@ -48,9 +50,47 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     );
   }, [employees, categoryFilter]);
 
+  const empCodeValidation = useMemo(() => {
+    if (!modalEmp) {
+      return {
+        activeConflict: undefined as Employee | undefined,
+        inactiveMatch: undefined as Employee | undefined,
+      };
+    }
+    const entered = modalEmp.data.empCode.trim().toLowerCase();
+    if (!entered) {
+      return { activeConflict: undefined, inactiveMatch: undefined };
+    }
+    const activeConflict = employees.find(
+      (e) =>
+        e.id !== modalEmp.data.id &&
+        e.active &&
+        e.empCode.trim().toLowerCase() === entered
+    );
+    const inactiveMatch = !activeConflict
+      ? employees.find(
+          (e) =>
+            e.id !== modalEmp.data.id &&
+            !e.active &&
+            e.empCode.trim().toLowerCase() === entered
+        )
+      : undefined;
+    return { activeConflict, inactiveMatch };
+  }, [modalEmp, employees]);
+
   const openNewModal = () => {
-    const nextNum = employees.length + 1;
-    const code = `EMP-${String(nextNum).padStart(3, '0')}`;
+    const existingLower = new Set(
+      employees.map((e) => e.empCode.trim().toLowerCase())
+    );
+    let nextNum = employees.length + 1;
+    let code = `EMP-${String(nextNum).padStart(3, '0')}`;
+    while (existingLower.has(code.toLowerCase())) {
+      nextNum += 1;
+      code = `EMP-${String(nextNum).padStart(3, '0')}`;
+    }
+
+    setFormError(null);
+    setTableAlert(null);
     setModalEmp({
       isNew: true,
       data: {
@@ -67,6 +107,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   };
 
   const openEditModal = (emp: Employee) => {
+    setFormError(null);
+    setTableAlert(null);
     setModalEmp({
       isNew: false,
       data: {
@@ -76,15 +118,54 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     });
   };
 
+  const handleToggleActiveClick = async (emp: Employee) => {
+    setTableAlert(null);
+    if (!emp.active) {
+      const entered = emp.empCode.trim().toLowerCase();
+      const activeConflict = employees.find(
+        (e) =>
+          e.id !== emp.id &&
+          e.active &&
+          e.empCode.trim().toLowerCase() === entered
+      );
+      if (activeConflict) {
+        setTableAlert(
+          `Cannot activate ${emp.name}: Employee ID "${emp.empCode}" is currently assigned to active employee ${activeConflict.name}. Edit ${emp.name}'s Employee ID first.`
+        );
+        return;
+      }
+    }
+    try {
+      await onToggleActive(emp);
+    } catch (err) {
+      setTableAlert((err as Error)?.message || 'Could not update employee status.');
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!modalEmp) return;
+
+    const trimmedCode = modalEmp.data.empCode.trim();
+    if (!trimmedCode) {
+      setFormError('Employee ID is required.');
+      return;
+    }
+
+    if (empCodeValidation.activeConflict) {
+      setFormError(
+        `Employee ID "${trimmedCode}" is already assigned to active employee ${empCodeValidation.activeConflict.name}. You can only reuse an ID if that employee is Inactive.`
+      );
+      return;
+    }
+
+    setFormError(null);
     setSaving(true);
     try {
       await onSaveEmployee(
         {
           ...modalEmp.data,
-          empCode: modalEmp.data.empCode.trim(),
+          empCode: trimmedCode,
           name: modalEmp.data.name.trim(),
           department: modalEmp.data.department.trim() || 'General',
           companyCategory: normalizeCompanyCategory(modalEmp.data.companyCategory),
@@ -93,10 +174,17 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         modalEmp.isNew
       );
       setModalEmp(null);
+    } catch (err) {
+      setFormError((err as Error)?.message || 'Could not save employee.');
     } finally {
       setSaving(false);
     }
   };
+
+  const liveConflictMessage = empCodeValidation.activeConflict
+    ? `Employee ID "${modalEmp?.data.empCode.trim()}" is already used by active employee ${empCodeValidation.activeConflict.name}. You can only reuse an ID when that employee is Inactive.`
+    : null;
+  const activeAlertText = formError || liveConflictMessage;
 
   return (
     <div className="space-y-6">
@@ -129,6 +217,23 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             </button>
           </div>
         </div>
+
+        {tableAlert && (
+          <div className="mx-6 my-4 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 text-red-600" />
+              <span>{tableAlert}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTableAlert(null)}
+              className="rounded p-1 text-red-600 hover:bg-red-100"
+              aria-label="Dismiss alert"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
 
         {employees.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50/70 px-6 py-3">
@@ -254,7 +359,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onToggleActive(emp)}
+                            onClick={() => handleToggleActiveClick(emp)}
                             className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
                           >
                             {emp.active ? 'Deactivate' : 'Activate'}
@@ -292,20 +397,41 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4 px-6 py-5">
+              {activeAlertText && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800"
+                >
+                  <AlertCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
+                  <span>{activeAlertText}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-slate-700">Employee ID</label>
                 <input
                   type="text"
                   required
                   value={modalEmp.data.empCode}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setFormError(null);
                     setModalEmp({
                       ...modalEmp,
                       data: { ...modalEmp.data, empCode: e.target.value },
-                    })
-                  }
-                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
+                    });
+                  }}
+                  aria-invalid={Boolean(empCodeValidation.activeConflict)}
+                  className={`mt-1.5 w-full rounded-lg border px-3 py-2 font-mono text-sm focus:outline-none ${
+                    empCodeValidation.activeConflict
+                      ? 'border-red-400 bg-red-50/40 text-red-900 focus:border-red-600'
+                      : 'border-slate-300 focus:border-teal-700'
+                  }`}
                 />
+                {empCodeValidation.inactiveMatch && (
+                  <p className="mt-1.5 text-[11px] font-medium text-amber-800">
+                    Previously used by inactive employee {empCodeValidation.inactiveMatch.name} — allowed to reuse.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -385,8 +511,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  disabled={saving || Boolean(empCodeValidation.activeConflict)}
+                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
                 >
                   {saving ? 'Saving...' : modalEmp.isNew ? 'Add Employee' : 'Save Changes'}
                 </button>
