@@ -147,6 +147,7 @@ service cloud.firestore {
     function isValidWorkspaceSettings(data) {
       return data.keys().hasAll(['spreadsheetId', 'spreadsheetTitle', 'spreadsheetUrl', 'tabNames', 'updatedAt'])
         && data.keys().hasOnly([
+          'companyCategory',
           'spreadsheetId',
           'spreadsheetTitle',
           'spreadsheetUrl',
@@ -154,6 +155,7 @@ service cloud.firestore {
           'tabNames',
           'updatedAt'
         ])
+        && (!('companyCategory' in data) || data.companyCategory in ['Sukhsa Export Permanent', 'Sukhsa Export Temporary'])
         && data.spreadsheetId is string && data.spreadsheetId.size() >= 1 && data.spreadsheetId.size() <= 128
         && data.spreadsheetTitle is string && data.spreadsheetTitle.size() >= 1 && data.spreadsheetTitle.size() <= 200
         && data.spreadsheetUrl is string && data.spreadsheetUrl.size() >= 1 && data.spreadsheetUrl.size() <= 300

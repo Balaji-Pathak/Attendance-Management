@@ -14,10 +14,10 @@ import {
 } from 'lucide-react';
 import {
   AttendanceRecord,
+  CategorySheetConfigs,
   COMPANY_CATEGORIES,
   CompanyCategory,
   Employee,
-  SheetConfig,
 } from '../types/attendance';
 import {
   calculateShiftMetrics,
@@ -36,7 +36,7 @@ import { StatusLabel } from './StatusLabel';
 interface IndividualEmployeeViewProps {
   employees: Employee[];
   records: AttendanceRecord[];
-  sheetConfig: SheetConfig | null;
+  sheetConfigs: CategorySheetConfigs;
   isGoogleAuthed: boolean;
   isSyncing?: boolean;
   onRequestSyncEmployeeTab: (employee: Employee) => void;
@@ -75,7 +75,7 @@ function getPreviousYearMonth(): string {
 export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   employees,
   records,
-  sheetConfig,
+  sheetConfigs,
   isGoogleAuthed,
   isSyncing = false,
   onRequestSyncEmployeeTab,
@@ -644,6 +644,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const tabName = selectedEmployee
     ? getEmployeeSheetTabName(selectedEmployee.empCode, selectedEmployee.name)
     : '';
+  const sheetConfig = selectedEmployee
+    ? sheetConfigs[normalizeCompanyCategory(selectedEmployee.companyCategory)]
+    : null;
 
   return (
     <div className="space-y-5">

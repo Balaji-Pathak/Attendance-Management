@@ -175,9 +175,13 @@
     },
     "WorkspaceSettings": {
       "title": "WorkspaceSettings",
-      "description": "Connected Master Google Spreadsheet metadata.",
+      "description": "Connected Master Google Spreadsheet metadata per company category.",
       "type": "object",
       "properties": {
+        "companyCategory": {
+          "type": "string",
+          "enum": ["Sukhsa Export Permanent", "Sukhsa Export Temporary"]
+        },
         "spreadsheetId": {
           "type": "string",
           "minLength": 1,

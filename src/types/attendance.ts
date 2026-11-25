@@ -69,12 +69,15 @@ export interface GateEmployeeView {
 }
 
 export interface SheetConfig {
+  companyCategory?: CompanyCategory;
   spreadsheetId: string;
   spreadsheetTitle: string;
   spreadsheetUrl: string;
   lastSyncedAt: string | null;
   tabNames: string[];
 }
+
+export type CategorySheetConfigs = Record<CompanyCategory, SheetConfig | null>;
 
 export interface DriveSpreadsheetItem {
   id: string;

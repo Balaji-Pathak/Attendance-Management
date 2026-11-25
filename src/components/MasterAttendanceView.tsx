@@ -2,11 +2,11 @@ import React, { useMemo, useState } from 'react';
 import { Download, Edit3, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   AttendanceRecord,
+  CategorySheetConfigs,
   COMPANY_CATEGORIES,
   CompanyCategory,
   DEFAULT_COMPANY_CATEGORY,
   Employee,
-  SheetConfig,
 } from '../types/attendance';
 import {
   calculateShiftMetrics,
@@ -25,16 +25,16 @@ import { StatusLabel } from './StatusLabel';
 interface MasterAttendanceViewProps {
   employees: Employee[];
   records: AttendanceRecord[];
-  sheetConfig: SheetConfig | null;
+  sheetConfigs: CategorySheetConfigs;
   onUpdateRecord: (updated: AttendanceRecord) => Promise<void>;
   onDeleteRecord: (record: AttendanceRecord) => void;
-  onRequestSyncAll: () => void;
+  onRequestSyncAll: (categoryFilter?: 'all' | CompanyCategory) => void;
 }
 
 export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   employees,
   records,
-  sheetConfig,
+  sheetConfigs,
   onUpdateRecord,
   onDeleteRecord,
   onRequestSyncAll,
@@ -364,10 +364,13 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
               <Download className="h-3.5 w-3.5" />
               <span>Export CSV</span>
             </button>
-            {sheetConfig && (
+            {((companyFilter === 'all' &&
+              (sheetConfigs['Sukhsa Export Permanent'] ||
+                sheetConfigs['Sukhsa Export Temporary'])) ||
+              (companyFilter !== 'all' && sheetConfigs[companyFilter])) && (
               <button
                 type="button"
-                onClick={onRequestSyncAll}
+                onClick={() => onRequestSyncAll(companyFilter)}
                 className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
               >
                 <RefreshCw className="h-3.5 w-3.5" />

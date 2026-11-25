@@ -1,4 +1,10 @@
-import { AttendanceRecord, DriveSpreadsheetItem, Employee, SheetConfig } from '../types/attendance';
+import {
+  AttendanceRecord,
+  CompanyCategory,
+  DriveSpreadsheetItem,
+  Employee,
+  SheetConfig,
+} from '../types/attendance';
 import {
   calculateShiftMetrics,
   formatDisplayTime,
@@ -94,10 +100,58 @@ export async function listAppSpreadsheets(token: string): Promise<DriveSpreadshe
   );
   const fields = encodeURIComponent('files(id,name,modifiedTime,webViewLink)');
   const data = await apiFetch<{ files?: DriveSpreadsheetItem[] }>(
-    `${DRIVE_BASE}?q=${q}&fields=${fields}&orderBy=modifiedTime desc&pageSize=25`,
+    `${DRIVE_BASE}?q=${q}&fields=${fields}&orderBy=modifiedTime desc&pageSize=30`,
     token
   );
   return data.files ?? [];
+}
+
+export async function trashSpreadsheet(
+  token: string,
+  spreadsheetId: string
+): Promise<{ trashed: boolean; reason?: string }> {
+  try {
+    await apiFetch(`${DRIVE_BASE}/${encodeURIComponent(spreadsheetId)}`, token, {
+      method: 'PATCH',
+      body: JSON.stringify({ trashed: true }),
+    });
+    return { trashed: true };
+  } catch (err) {
+    const errorObj = err as Error & { status?: number };
+    if (errorObj?.status === 401) {
+      throw err;
+    }
+    return {
+      trashed: false,
+      reason:
+        errorObj?.message ||
+        'Could not delete file in Google Drive (only the file owner can move it to Trash).',
+    };
+  }
+}
+
+function filterByCompanyCategory(
+  employees: Employee[],
+  records: AttendanceRecord[],
+  companyCategory?: CompanyCategory
+): { employees: Employee[]; records: AttendanceRecord[]; otherTabNames: Set<string> } {
+  if (!companyCategory) {
+    return { employees, records, otherTabNames: new Set() };
+  }
+  const catEmployees = employees.filter(
+    (e) => normalizeCompanyCategory(e.companyCategory) === companyCategory
+  );
+  const empIds = new Set(catEmployees.map((e) => e.id));
+  const empCodes = new Set(catEmployees.map((e) => e.empCode));
+  const catRecords = records.filter(
+    (r) => empIds.has(r.empId) || empCodes.has(r.empCode)
+  );
+  const otherTabNames = new Set(
+    employees
+      .filter((e) => normalizeCompanyCategory(e.companyCategory) !== companyCategory)
+      .map((e) => getEmployeeSheetTabName(e.empCode, e.name))
+  );
+  return { employees: catEmployees, records: catRecords, otherTabNames };
 }
 
 interface SpreadsheetMetadataResponse {
@@ -194,6 +248,27 @@ function getMonthlyThekaDecimal(employee: Employee, monthFilter?: string): numbe
     0
   );
   return Number((totalMins / 60).toFixed(2));
+}
+
+function getLatestActiveMonthForEmployee(
+  employee: Employee,
+  records: AttendanceRecord[]
+): string {
+  const now = new Date();
+  const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const empMonths = new Set<string>();
+  for (const r of records) {
+    if (
+      (r.empId === employee.id || r.empCode === employee.empCode) &&
+      r.date &&
+      /^\d{4}-\d{2}/.test(r.date)
+    ) {
+      empMonths.add(r.date.slice(0, 7));
+    }
+  }
+  if (empMonths.has(currentYm)) return currentYm;
+  const sorted = Array.from(empMonths).sort((a, b) => b.localeCompare(a));
+  return sorted[0] ?? currentYm;
 }
 
 function buildIndividualEmployeeRows(
@@ -425,15 +500,15 @@ async function formatSheetHeaders(
         const thekaRowIdx = totalRowIdx + 1;
         const netPayableRowIdx = totalRowIdx + 2;
 
-        // Reset data area formatting cleanly so updated row counts don't inherit old footer tints
+        // Reset data area formatting cleanly (including any leftover columns J-L)
         requests.push({
           repeatCell: {
             range: {
               sheetId: s.sheetId,
               startRowIndex: bodyStart,
-              endRowIndex: netPayableRowIdx + 15,
+              endRowIndex: netPayableRowIdx + 20,
               startColumnIndex: 0,
-              endColumnIndex: 9,
+              endColumnIndex: 12,
             },
             cell: {
               userEnteredFormat: {
@@ -532,12 +607,17 @@ export async function createMasterSpreadsheet(
   token: string,
   title: string,
   employees: Employee[],
-  records: AttendanceRecord[]
+  records: AttendanceRecord[],
+  companyCategory?: CompanyCategory
 ): Promise<SheetConfig> {
+  const scoped = filterByCompanyCategory(employees, records, companyCategory);
+  const scopedEmps = scoped.employees;
+  const scopedRecs = scoped.records;
+
   const initialSheets = [
     { properties: { title: MASTER_TAB_NAME, gridProperties: { frozenRowCount: 1 } } },
     { properties: { title: EMPLOYEES_TAB_NAME, gridProperties: { frozenRowCount: 1 } } },
-    ...employees.map((e) => ({
+    ...scopedEmps.map((e) => ({
       properties: {
         title: getEmployeeSheetTabName(e.empCode, e.name),
         gridProperties: { frozenRowCount: 4 },
@@ -556,15 +636,19 @@ export async function createMasterSpreadsheet(
   const valueRanges = [
     {
       range: `'${MASTER_TAB_NAME}'!A1`,
-      values: buildMasterRows(records, employees),
+      values: buildMasterRows(scopedRecs, scopedEmps),
     },
     {
       range: `'${EMPLOYEES_TAB_NAME}'!A1`,
-      values: buildEmployeesRows(employees),
+      values: buildEmployeesRows(scopedEmps),
     },
-    ...employees.map((e) => ({
+    ...scopedEmps.map((e) => ({
       range: `'${getEmployeeSheetTabName(e.empCode, e.name)}'!A1`,
-      values: buildIndividualEmployeeRows(e, records),
+      values: buildIndividualEmployeeRows(
+        e,
+        scopedRecs,
+        getLatestActiveMonthForEmployee(e, scopedRecs)
+      ),
     })),
   ];
 
@@ -581,10 +665,15 @@ export async function createMasterSpreadsheet(
   );
 
   const empRowCountByTab = new Map(
-    employees.map((e) => [
-      getEmployeeSheetTabName(e.empCode, e.name),
-      records.filter((r) => r.empId === e.id || r.empCode === e.empCode).length,
-    ])
+    scopedEmps.map((e) => {
+      const ym = getLatestActiveMonthForEmployee(e, scopedRecs);
+      return [
+        getEmployeeSheetTabName(e.empCode, e.name),
+        scopedRecs.filter(
+          (r) => (r.empId === e.id || r.empCode === e.empCode) && r.date.startsWith(ym)
+        ).length,
+      ];
+    })
   );
 
   await formatSheetHeaders(
@@ -598,6 +687,7 @@ export async function createMasterSpreadsheet(
   );
 
   return {
+    companyCategory,
     spreadsheetId: created.spreadsheetId,
     spreadsheetTitle: created.properties.title,
     spreadsheetUrl: created.spreadsheetUrl,
@@ -610,35 +700,61 @@ export async function syncFullWorkbook(
   token: string,
   spreadsheetId: string,
   employees: Employee[],
-  records: AttendanceRecord[]
+  records: AttendanceRecord[],
+  companyCategory?: CompanyCategory
 ): Promise<SheetConfig> {
+  const scoped = filterByCompanyCategory(employees, records, companyCategory);
+  const scopedEmps = scoped.employees;
+  const scopedRecs = scoped.records;
+
   let meta = await getSpreadsheetMetadata(token, spreadsheetId);
   const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
 
   const requiredTabs = [
     MASTER_TAB_NAME,
     EMPLOYEES_TAB_NAME,
-    ...employees.map((e) => getEmployeeSheetTabName(e.empCode, e.name)),
+    ...scopedEmps.map((e) => getEmployeeSheetTabName(e.empCode, e.name)),
   ];
+  const requiredSet = new Set(requiredTabs);
 
   const missingTabs = requiredTabs.filter((t) => !existingTitles.has(t));
-  if (missingTabs.length > 0) {
-    await apiFetch(`${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, token, {
-      method: 'POST',
-      body: JSON.stringify({
-        requests: missingTabs.map((t) => ({
-          addSheet: {
-            properties: {
-              title: t,
-              gridProperties: {
-                frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
-              },
+  const staleOtherTabs = meta.sheets.filter(
+    (s) =>
+      scoped.otherTabNames.has(s.properties.title) &&
+      !requiredSet.has(s.properties.title)
+  );
+
+  if (missingTabs.length > 0 || staleOtherTabs.length > 0) {
+    const tabRequests: unknown[] = [
+      ...missingTabs.map((t) => ({
+        addSheet: {
+          properties: {
+            title: t,
+            gridProperties: {
+              frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
             },
           },
-        })),
-      }),
-    });
-    meta = await getSpreadsheetMetadata(token, spreadsheetId);
+        },
+      })),
+    ];
+
+    // Only delete displaced employee tabs if at least 1 sheet will remain
+    const remainingCount = meta.sheets.length + missingTabs.length - staleOtherTabs.length;
+    if (remainingCount >= 1) {
+      for (const s of staleOtherTabs) {
+        tabRequests.push({
+          deleteSheet: { sheetId: s.properties.sheetId },
+        });
+      }
+    }
+
+    if (tabRequests.length > 0) {
+      await apiFetch(`${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, token, {
+        method: 'POST',
+        body: JSON.stringify({ requests: tabRequests }),
+      });
+      meta = await getSpreadsheetMetadata(token, spreadsheetId);
+    }
   }
 
   await apiFetch(
@@ -647,17 +763,21 @@ export async function syncFullWorkbook(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: requiredTabs.map((t) => `'${t}'!A1:M5000`),
+        ranges: requiredTabs.map((t) => `'${t}'!A1:Z5000`),
       }),
     }
   );
 
   const valueRanges = [
-    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records, employees) },
-    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(employees) },
-    ...employees.map((e) => ({
+    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(scopedRecs, scopedEmps) },
+    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(scopedEmps) },
+    ...scopedEmps.map((e) => ({
       range: `'${getEmployeeSheetTabName(e.empCode, e.name)}'!A1`,
-      values: buildIndividualEmployeeRows(e, records),
+      values: buildIndividualEmployeeRows(
+        e,
+        scopedRecs,
+        getLatestActiveMonthForEmployee(e, scopedRecs)
+      ),
     })),
   ];
 
@@ -674,10 +794,15 @@ export async function syncFullWorkbook(
   );
 
   const empRowCountByTab = new Map(
-    employees.map((e) => [
-      getEmployeeSheetTabName(e.empCode, e.name),
-      records.filter((r) => r.empId === e.id || r.empCode === e.empCode).length,
-    ])
+    scopedEmps.map((e) => {
+      const ym = getLatestActiveMonthForEmployee(e, scopedRecs);
+      return [
+        getEmployeeSheetTabName(e.empCode, e.name),
+        scopedRecs.filter(
+          (r) => (r.empId === e.id || r.empCode === e.empCode) && r.date.startsWith(ym)
+        ).length,
+      ];
+    })
   );
   const allManagedMeta = meta.sheets
     .filter((s) => requiredTabs.includes(s.properties.title))
@@ -691,6 +816,7 @@ export async function syncFullWorkbook(
   }
 
   return {
+    companyCategory,
     spreadsheetId: meta.spreadsheetId,
     spreadsheetTitle: meta.properties.title,
     spreadsheetUrl: meta.spreadsheetUrl,
@@ -704,30 +830,55 @@ export async function syncEmployeeAndMasterTabs(
   spreadsheetId: string,
   employee: Employee,
   employees: Employee[],
-  records: AttendanceRecord[]
+  records: AttendanceRecord[],
+  companyCategory?: CompanyCategory
 ): Promise<SheetConfig> {
+  const effectiveCategory =
+    companyCategory ?? normalizeCompanyCategory(employee.companyCategory);
+  const scoped = filterByCompanyCategory(employees, records, effectiveCategory);
+  const scopedEmps = scoped.employees;
+  const scopedRecs = scoped.records;
+
   let meta = await getSpreadsheetMetadata(token, spreadsheetId);
   const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
   const empTab = getEmployeeSheetTabName(employee.empCode, employee.name);
+  const belongsHere =
+    normalizeCompanyCategory(employee.companyCategory) === effectiveCategory;
 
-  const neededTabs = [MASTER_TAB_NAME, EMPLOYEES_TAB_NAME, empTab];
+  const neededTabs = belongsHere
+    ? [MASTER_TAB_NAME, EMPLOYEES_TAB_NAME, empTab]
+    : [MASTER_TAB_NAME, EMPLOYEES_TAB_NAME];
   const missingTabs = neededTabs.filter((t) => !existingTitles.has(t));
+  const staleOtherTabs = meta.sheets.filter(
+    (s) =>
+      scoped.otherTabNames.has(s.properties.title) &&
+      !neededTabs.includes(s.properties.title)
+  );
 
-  if (missingTabs.length > 0) {
+  if (missingTabs.length > 0 || staleOtherTabs.length > 0) {
+    const tabRequests: unknown[] = missingTabs.map((t) => ({
+      addSheet: {
+        properties: {
+          title: t,
+          gridProperties: {
+            frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
+          },
+        },
+      },
+    }));
+
+    const remainingCount = meta.sheets.length + missingTabs.length - staleOtherTabs.length;
+    if (remainingCount >= 1) {
+      for (const s of staleOtherTabs) {
+        tabRequests.push({
+          deleteSheet: { sheetId: s.properties.sheetId },
+        });
+      }
+    }
+
     await apiFetch(`${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, token, {
       method: 'POST',
-      body: JSON.stringify({
-        requests: missingTabs.map((t) => ({
-          addSheet: {
-            properties: {
-              title: t,
-              gridProperties: {
-                frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
-              },
-            },
-          },
-        })),
-      }),
+      body: JSON.stringify({ requests: tabRequests }),
     });
     meta = await getSpreadsheetMetadata(token, spreadsheetId);
   }
@@ -738,10 +889,22 @@ export async function syncEmployeeAndMasterTabs(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: neededTabs.map((t) => `'${t}'!A1:M5000`),
+        ranges: neededTabs.map((t) => `'${t}'!A1:Z5000`),
       }),
     }
   );
+
+  const empLatestYm = getLatestActiveMonthForEmployee(employee, scopedRecs);
+  const dataToWrite = [
+    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(scopedRecs, scopedEmps) },
+    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(scopedEmps) },
+  ];
+  if (belongsHere) {
+    dataToWrite.push({
+      range: `'${empTab}'!A1`,
+      values: buildIndividualEmployeeRows(employee, scopedRecs, empLatestYm),
+    });
+  }
 
   await apiFetch(
     `${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
@@ -750,17 +913,15 @@ export async function syncEmployeeAndMasterTabs(
       method: 'POST',
       body: JSON.stringify({
         valueInputOption: 'USER_ENTERED',
-        data: [
-          { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records, employees) },
-          { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(employees) },
-          { range: `'${empTab}'!A1`, values: buildIndividualEmployeeRows(employee, records) },
-        ],
+        data: dataToWrite,
       }),
     }
   );
 
-  const empRowCount = records.filter(
-    (r) => r.empId === employee.id || r.empCode === employee.empCode
+  const empRowCount = scopedRecs.filter(
+    (r) =>
+      (r.empId === employee.id || r.empCode === employee.empCode) &&
+      r.date.startsWith(empLatestYm)
   ).length;
   const tabsToFormat = meta.sheets
     .filter((s) => neededTabs.includes(s.properties.title))
@@ -774,6 +935,7 @@ export async function syncEmployeeAndMasterTabs(
   }
 
   return {
+    companyCategory: effectiveCategory,
     spreadsheetId: meta.spreadsheetId,
     spreadsheetTitle: meta.properties.title,
     spreadsheetUrl: meta.spreadsheetUrl,
@@ -782,74 +944,147 @@ export async function syncEmployeeAndMasterTabs(
   };
 }
 
+const LEGACY_GENERIC_TABS = new Set(['Attendance', 'Sheet1', 'Sheet 1']);
+
 export async function createOrUpdateStandaloneEmployeeSheet(
   token: string,
   employee: Employee,
   records: AttendanceRecord[],
   monthFilter?: string
 ): Promise<{ spreadsheetId: string; spreadsheetUrl: string }> {
-  const tabTitle = 'Attendance';
-  const monthTabTitle = monthFilter ? formatMonthLabel(monthFilter) : null;
-  const allEmpRecordsCount = records.filter(
+  const empRecords = records.filter(
     (r) => r.empId === employee.id || r.empCode === employee.empCode
-  ).length;
-  const monthEmpRecordsCount = monthFilter
-    ? records.filter(
-        (r) =>
-          (r.empId === employee.id || r.empCode === employee.empCode) &&
-          r.date.startsWith(monthFilter)
-      ).length
-    : 0;
+  );
+
+  const monthSet = new Set<string>();
+  for (const r of empRecords) {
+    if (r.date && /^\d{4}-\d{2}/.test(r.date)) {
+      monthSet.add(r.date.slice(0, 7));
+    }
+  }
+  for (const ym of Object.keys(employee.monthlyThikadaMinutes ?? {})) {
+    if (/^\d{4}-\d{2}$/.test(ym) && (employee.monthlyThikadaMinutes?.[ym] ?? 0) > 0) {
+      monthSet.add(ym);
+    }
+  }
+  if (monthFilter && /^\d{4}-\d{2}$/.test(monthFilter)) {
+    monthSet.add(monthFilter);
+  }
+  if (monthSet.size === 0) {
+    const now = new Date();
+    monthSet.add(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
+  }
+
+  // Newest month first so the active/current month is always the opening tab
+  const monthsToSync = Array.from(monthSet).sort((a, b) => b.localeCompare(a));
+  const monthTabs = monthsToSync.map((ym) => ({
+    ym,
+    title: formatMonthLabel(ym),
+    rowCount: empRecords.filter((r) => r.date.startsWith(ym)).length,
+  }));
 
   if (employee.individualSheetId) {
     try {
       let meta = await getSpreadsheetMetadata(token, employee.individualSheetId);
-      const firstTab = meta.sheets[0]?.properties.title ?? tabTitle;
-      const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
+      const existingByTitle = new Map(
+        meta.sheets.map((s) => [s.properties.title, s.properties.sheetId])
+      );
 
-      if (monthTabTitle && !existingTitles.has(monthTabTitle)) {
+      // Migrate legacy generic tabs ("Attendance", "Sheet1") cleanly to month-specific tabs
+      const renameTarget = monthTabs.find((t) => !existingByTitle.has(t.title));
+      const legacyTab = meta.sheets.find((s) => LEGACY_GENERIC_TABS.has(s.properties.title));
+      const structureRequests: unknown[] = [];
+
+      let renamedLegacyId: number | null = null;
+      if (legacyTab && renameTarget) {
+        structureRequests.push({
+          updateSheetProperties: {
+            properties: {
+              sheetId: legacyTab.properties.sheetId,
+              title: renameTarget.title,
+              gridProperties: { frozenRowCount: 4 },
+            },
+            fields: 'title,gridProperties.frozenRowCount',
+          },
+        });
+        renamedLegacyId = legacyTab.properties.sheetId;
+        existingByTitle.delete(legacyTab.properties.title);
+        existingByTitle.set(renameTarget.title, legacyTab.properties.sheetId);
+      }
+
+      const missingTabs = monthTabs.filter((t) => !existingByTitle.has(t.title));
+      for (const t of missingTabs) {
+        structureRequests.push({
+          addSheet: {
+            properties: {
+              title: t.title,
+              gridProperties: { frozenRowCount: 4 },
+            },
+          },
+        });
+      }
+
+      // Remove any remaining legacy mixed "Attendance" / "Sheet1" tabs once monthly tabs exist
+      const leftoverLegacy = meta.sheets.filter(
+        (s) =>
+          LEGACY_GENERIC_TABS.has(s.properties.title) &&
+          s.properties.sheetId !== renamedLegacyId
+      );
+      const projectedSheetCount =
+        meta.sheets.length + missingTabs.length - leftoverLegacy.length;
+      if (projectedSheetCount >= 1) {
+        for (const s of leftoverLegacy) {
+          structureRequests.push({
+            deleteSheet: { sheetId: s.properties.sheetId },
+          });
+        }
+      }
+
+      if (structureRequests.length > 0) {
         await apiFetch(
           `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}:batchUpdate`,
           token,
           {
             method: 'POST',
-            body: JSON.stringify({
-              requests: [
-                {
-                  addSheet: {
-                    properties: {
-                      title: monthTabTitle,
-                      gridProperties: { frozenRowCount: 4 },
-                    },
-                  },
-                },
-              ],
-            }),
+            body: JSON.stringify({ requests: structureRequests }),
           }
         );
         meta = await getSpreadsheetMetadata(token, meta.spreadsheetId);
       }
 
-      const firstTabIsMonth = Boolean(monthTabTitle && firstTab === monthTabTitle);
-      const rangesToClear = [`'${firstTab}'!A1:I5000`];
-      const dataUpdates = [
-        {
-          range: `'${firstTab}'!A1`,
-          values: buildIndividualEmployeeRows(
-            employee,
-            records,
-            firstTabIsMonth ? monthFilter : undefined
-          ),
-        },
-      ];
-
-      if (monthTabTitle && monthTabTitle !== firstTab) {
-        rangesToClear.push(`'${monthTabTitle}'!A1:I5000`);
-        dataUpdates.push({
-          range: `'${monthTabTitle}'!A1`,
-          values: buildIndividualEmployeeRows(employee, records, monthFilter),
-        });
+      // Order monthly tabs newest-first (Index 0 = newest month)
+      const orderRequests: unknown[] = [];
+      monthTabs.forEach((t, idx) => {
+        const sheet = meta.sheets.find((s) => s.properties.title === t.title);
+        if (sheet && sheet.properties.index !== idx) {
+          orderRequests.push({
+            updateSheetProperties: {
+              properties: {
+                sheetId: sheet.properties.sheetId,
+                index: idx,
+              },
+              fields: 'index',
+            },
+          });
+        }
+      });
+      if (orderRequests.length > 0) {
+        await apiFetch(
+          `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}:batchUpdate`,
+          token,
+          {
+            method: 'POST',
+            body: JSON.stringify({ requests: orderRequests }),
+          }
+        );
+        meta = await getSpreadsheetMetadata(token, meta.spreadsheetId);
       }
+
+      const rangesToClear = monthTabs.map((t) => `'${t.title}'!A1:Z5000`);
+      const dataUpdates = monthTabs.map((t) => ({
+        range: `'${t.title}'!A1`,
+        values: buildIndividualEmployeeRows(employee, records, t.ym),
+      }));
 
       await apiFetch(
         `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}/values:batchClear`,
@@ -871,19 +1106,13 @@ export async function createOrUpdateStandaloneEmployeeSheet(
         }
       );
 
+      const rowCountByTitle = new Map(monthTabs.map((t) => [t.title, t.rowCount]));
       const tabsToFormat = meta.sheets
-        .filter(
-          (s) =>
-            s.properties.title === firstTab ||
-            (monthTabTitle && s.properties.title === monthTabTitle)
-        )
+        .filter((s) => rowCountByTitle.has(s.properties.title))
         .map((s) => ({
           sheetId: s.properties.sheetId,
           title: s.properties.title,
-          dataRowCount:
-            monthTabTitle && s.properties.title === monthTabTitle
-              ? monthEmpRecordsCount
-              : allEmpRecordsCount,
+          dataRowCount: rowCountByTitle.get(s.properties.title) ?? 0,
         }));
       await formatSheetHeaders(token, meta.spreadsheetId, tabsToFormat);
 
@@ -893,12 +1122,9 @@ export async function createOrUpdateStandaloneEmployeeSheet(
     }
   }
 
-  const initialSheets = [
-    { properties: { title: tabTitle, gridProperties: { frozenRowCount: 4 } } },
-    ...(monthTabTitle
-      ? [{ properties: { title: monthTabTitle, gridProperties: { frozenRowCount: 4 } } }]
-      : []),
-  ];
+  const initialSheets = monthTabs.map((t) => ({
+    properties: { title: t.title, gridProperties: { frozenRowCount: 4 } },
+  }));
 
   const created = await apiFetch<SpreadsheetMetadataResponse>(SHEETS_BASE, token, {
     method: 'POST',
@@ -908,20 +1134,10 @@ export async function createOrUpdateStandaloneEmployeeSheet(
     }),
   });
 
-  const dataUpdates = [
-    {
-      range: `'${tabTitle}'!A1`,
-      values: buildIndividualEmployeeRows(employee, records),
-    },
-    ...(monthTabTitle
-      ? [
-          {
-            range: `'${monthTabTitle}'!A1`,
-            values: buildIndividualEmployeeRows(employee, records, monthFilter),
-          },
-        ]
-      : []),
-  ];
+  const dataUpdates = monthTabs.map((t) => ({
+    range: `'${t.title}'!A1`,
+    values: buildIndividualEmployeeRows(employee, records, t.ym),
+  }));
 
   await apiFetch(
     `${SHEETS_BASE}/${encodeURIComponent(created.spreadsheetId)}/values:batchUpdate`,
@@ -935,16 +1151,14 @@ export async function createOrUpdateStandaloneEmployeeSheet(
     }
   );
 
+  const rowCountByTitle = new Map(monthTabs.map((t) => [t.title, t.rowCount]));
   await formatSheetHeaders(
     token,
     created.spreadsheetId,
     created.sheets.map((s) => ({
       sheetId: s.properties.sheetId,
       title: s.properties.title,
-      dataRowCount:
-        monthTabTitle && s.properties.title === monthTabTitle
-          ? monthEmpRecordsCount
-          : allEmpRecordsCount,
+      dataRowCount: rowCountByTitle.get(s.properties.title) ?? 0,
     }))
   );
 
@@ -1006,135 +1220,146 @@ export async function importEmployeeGoogleSheet(
 }> {
   const spreadsheetId = extractSpreadsheetId(spreadsheetIdOrUrl);
   const meta = await getSpreadsheetMetadata(token, spreadsheetId);
-  const targetSheet =
-    meta.sheets.find((s) => /attendance/i.test(s.properties.title)) ?? meta.sheets[0];
-  if (!targetSheet) {
+  if (!meta.sheets || meta.sheets.length === 0) {
     throw new Error('This Google Spreadsheet has no readable tabs.');
   }
 
-  const tabTitle = targetSheet.properties.title;
-  const range = encodeURIComponent(`'${tabTitle}'!A1:L5000`);
-  const res = await apiFetch<{ values?: string[][] }>(
-    `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}/values/${range}`,
+  const rangesQuery = meta.sheets
+    .map((s) => `ranges=${encodeURIComponent(`'${s.properties.title}'!A1:L5000`)}`)
+    .join('&');
+  const batch = await apiFetch<{
+    valueRanges?: Array<{ range: string; values?: string[][] }>;
+  }>(
+    `${SHEETS_BASE}/${encodeURIComponent(meta.spreadsheetId)}/values:batchGet?${rangesQuery}`,
     token
   );
-  const rows = res.values ?? [];
 
-  // Detect column indices from header row if present, else default cleanly
-  let dateCol = 0;
-  let inCol = 1;
-  let outCol = 2;
-  let awayCol = -1;
-  let thikadaCol = -1;
-  let startRow = 0;
+  const importedById = new Map<string, AttendanceRecord>();
 
-  for (let i = 0; i < Math.min(rows.length, 10); i += 1) {
-    const row = rows[i].map((c) => String(c || '').trim().toLowerCase());
-    const foundDate = row.findIndex((c) => c === 'date' || c.includes('date'));
-    const foundIn = row.findIndex(
-      (c) => c === 'in' || c === 'in time' || c === 'check in' || c === 'checkin'
-    );
-    const foundOut = row.findIndex(
-      (c) => c === 'out' || c === 'out time' || c === 'check out' || c === 'checkout'
-    );
-    if (foundDate !== -1 && (foundIn !== -1 || foundOut !== -1)) {
-      dateCol = foundDate;
-      inCol = foundIn !== -1 ? foundIn : foundDate + 1;
-      outCol = foundOut !== -1 ? foundOut : inCol + 1;
-      awayCol = row.findIndex((c) => c.includes('away') || c.includes('pause'));
-      thikadaCol = row.findIndex((c) => c.includes('thikada') || c.includes('hikada'));
-      startRow = i + 1;
-      break;
-    }
-  }
+  for (const vr of batch.valueRanges ?? []) {
+    const rows = vr.values ?? [];
+    if (rows.length === 0) continue;
 
-  const imported: AttendanceRecord[] = [];
-  for (let i = startRow; i < rows.length; i += 1) {
-    const row = rows[i];
-    if (!row || row.length === 0) continue;
+    let dateCol = 0;
+    let inCol = 1;
+    let outCol = 2;
+    let awayCol = -1;
+    let thikadaCol = -1;
+    let startRow = 0;
+    let matchedHeader = false;
 
-    const dateIso = normalizeDateToISO(row[dateCol]);
-    if (!dateIso) continue;
-
-    const inTime = parseDisplayTimeToHHMM(row[inCol]);
-    const outTime = parseDisplayTimeToHHMM(row[outCol]);
-    if (!inTime) continue;
-
-    const awayMinsRaw = awayCol !== -1 ? Number(row[awayCol]) : 0;
-    const awayMinutes =
-      !Number.isNaN(awayMinsRaw) && awayMinsRaw > 0 ? Math.round(awayMinsRaw) : 0;
-    const pausedTotalSeconds = awayMinutes * 60;
-
-    const thikadaHrsRaw = thikadaCol !== -1 ? Number(row[thikadaCol]) : 0;
-    const thikadaMinutes =
-      !Number.isNaN(thikadaHrsRaw) && thikadaHrsRaw > 0
-        ? Math.round(thikadaHrsRaw * 60)
-        : 0;
-
-    if (outTime) {
-      const calc = calculateShiftMetrics(
-        inTime,
-        outTime,
-        employee.breakMinutes || 30,
-        dateIso,
-        awayMinutes,
-        thikadaMinutes
+    for (let i = 0; i < Math.min(rows.length, 10); i += 1) {
+      const row = rows[i].map((c) => String(c || '').trim().toLowerCase());
+      const foundDate = row.findIndex((c) => c === 'date' || c.includes('date'));
+      const foundIn = row.findIndex(
+        (c) => c === 'in' || c === 'in time' || c === 'check in' || c === 'checkin'
       );
-      imported.push({
-        id: `${dateIso}_${employee.id}`,
-        date: dateIso,
-        empId: employee.id,
-        empCode: employee.empCode,
-        empName: employee.name,
-        inTime,
-        outTime,
-        startedAtMs: null,
-        isPaused: false,
-        pausedAtMs: null,
-        pausedTotalSeconds,
-        grossMinutes: calc.grossMinutes,
-        breakMinutes: calc.breakDeductedMinutes,
-        netMinutes: calc.netMinutes,
-        netDecimalHours: calc.netDecimalHours,
-        overtimeMinutes: calc.overtimeMinutes,
-        overtimeDecimalHours: calc.overtimeDecimalHours,
-        presentCount: calc.presentCount,
-        thikadaMinutes: calc.thikadaMinutes,
-        normalMinutes: calc.normalMinutes,
-        normalDecimalHours: calc.normalDecimalHours,
-        isSunday: calc.isSunday,
-        status: calc.status,
-        syncedToSheet: true,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      imported.push({
-        id: `${dateIso}_${employee.id}`,
-        date: dateIso,
-        empId: employee.id,
-        empCode: employee.empCode,
-        empName: employee.name,
-        inTime,
-        outTime: null,
-        startedAtMs: null,
-        isPaused: false,
-        pausedAtMs: null,
-        pausedTotalSeconds,
-        grossMinutes: null,
-        breakMinutes: employee.breakMinutes || 30,
-        netMinutes: null,
-        netDecimalHours: null,
-        overtimeMinutes: null,
-        overtimeDecimalHours: null,
-        presentCount: null,
-        thikadaMinutes,
-        normalMinutes: null,
-        normalDecimalHours: null,
-        isSunday: isSundayISO(dateIso),
-        status: 'on_duty',
-        syncedToSheet: true,
-        updatedAt: new Date().toISOString(),
-      });
+      const foundOut = row.findIndex(
+        (c) => c === 'out' || c === 'out time' || c === 'check out' || c === 'checkout'
+      );
+      if (foundDate !== -1 && (foundIn !== -1 || foundOut !== -1)) {
+        dateCol = foundDate;
+        inCol = foundIn !== -1 ? foundIn : foundDate + 1;
+        outCol = foundOut !== -1 ? foundOut : inCol + 1;
+        awayCol = row.findIndex((c) => c.includes('away') || c.includes('pause'));
+        thikadaCol = row.findIndex((c) => c.includes('thikada') || c.includes('hikada'));
+        startRow = i + 1;
+        matchedHeader = true;
+        break;
+      }
+    }
+
+    // If a workbook has multiple tabs, skip non-attendance tabs without a header unless it's the only tab
+    if (!matchedHeader && meta.sheets.length > 1) continue;
+
+    for (let i = startRow; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row || row.length === 0) continue;
+
+      const dateIso = normalizeDateToISO(row[dateCol]);
+      if (!dateIso) continue;
+
+      const inTime = parseDisplayTimeToHHMM(row[inCol]);
+      const outTime = parseDisplayTimeToHHMM(row[outCol]);
+      if (!inTime) continue;
+
+      const awayMinsRaw = awayCol !== -1 ? Number(row[awayCol]) : 0;
+      const awayMinutes =
+        !Number.isNaN(awayMinsRaw) && awayMinsRaw > 0 ? Math.round(awayMinsRaw) : 0;
+      const pausedTotalSeconds = awayMinutes * 60;
+
+      const thikadaHrsRaw = thikadaCol !== -1 ? Number(row[thikadaCol]) : 0;
+      const thikadaMinutes =
+        !Number.isNaN(thikadaHrsRaw) && thikadaHrsRaw > 0
+          ? Math.round(thikadaHrsRaw * 60)
+          : 0;
+
+      const recordId = `${dateIso}_${employee.id}`;
+      if (outTime) {
+        const calc = calculateShiftMetrics(
+          inTime,
+          outTime,
+          employee.breakMinutes || 30,
+          dateIso,
+          awayMinutes,
+          thikadaMinutes
+        );
+        importedById.set(recordId, {
+          id: recordId,
+          date: dateIso,
+          empId: employee.id,
+          empCode: employee.empCode,
+          empName: employee.name,
+          inTime,
+          outTime,
+          startedAtMs: null,
+          isPaused: false,
+          pausedAtMs: null,
+          pausedTotalSeconds,
+          grossMinutes: calc.grossMinutes,
+          breakMinutes: calc.breakDeductedMinutes,
+          netMinutes: calc.netMinutes,
+          netDecimalHours: calc.netDecimalHours,
+          overtimeMinutes: calc.overtimeMinutes,
+          overtimeDecimalHours: calc.overtimeDecimalHours,
+          presentCount: calc.presentCount,
+          thikadaMinutes: calc.thikadaMinutes,
+          normalMinutes: calc.normalMinutes,
+          normalDecimalHours: calc.normalDecimalHours,
+          isSunday: calc.isSunday,
+          status: calc.status,
+          syncedToSheet: true,
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        importedById.set(recordId, {
+          id: recordId,
+          date: dateIso,
+          empId: employee.id,
+          empCode: employee.empCode,
+          empName: employee.name,
+          inTime,
+          outTime: null,
+          startedAtMs: null,
+          isPaused: false,
+          pausedAtMs: null,
+          pausedTotalSeconds,
+          grossMinutes: null,
+          breakMinutes: employee.breakMinutes || 30,
+          netMinutes: null,
+          netDecimalHours: null,
+          overtimeMinutes: null,
+          overtimeDecimalHours: null,
+          presentCount: null,
+          thikadaMinutes,
+          normalMinutes: null,
+          normalDecimalHours: null,
+          isSunday: isSundayISO(dateIso),
+          status: 'on_duty',
+          syncedToSheet: true,
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
   }
 
@@ -1142,7 +1367,7 @@ export async function importEmployeeGoogleSheet(
     spreadsheetId: meta.spreadsheetId,
     spreadsheetUrl: meta.spreadsheetUrl,
     spreadsheetTitle: meta.properties.title,
-    records: imported,
+    records: Array.from(importedById.values()),
   };
 }
 

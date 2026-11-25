@@ -13,6 +13,8 @@ import {
 import {
   AdminEmailEntry,
   AttendanceRecord,
+  CategorySheetConfigs,
+  CompanyCategory,
   Employee,
   GateEmployeeView,
   SheetConfig,
@@ -33,7 +35,13 @@ const EMPLOYEES_COL = 'employees';
 const ATTENDANCE_COL = 'attendance';
 const SETTINGS_COL = 'settings';
 const ADMIN_EMAILS_COL = 'admin_emails';
-const WORKSPACE_DOC_ID = 'workspace';
+const LEGACY_WORKSPACE_DOC_ID = 'workspace';
+
+export function getWorkspaceDocId(category: CompanyCategory): string {
+  return category === 'Sukhsa Export Temporary'
+    ? 'workspace_temporary'
+    : 'workspace_permanent';
+}
 
 function sanitizeMonthlyThikada(
   raw?: Record<string, number>
@@ -522,30 +530,53 @@ export function subscribeAllAttendance(
   );
 }
 
+function docToSheetConfig(
+  data: Record<string, unknown>,
+  fallbackCategory?: CompanyCategory
+): SheetConfig {
+  return {
+    companyCategory: data.companyCategory
+      ? normalizeCompanyCategory(data.companyCategory)
+      : fallbackCategory,
+    spreadsheetId: String(data.spreadsheetId ?? ''),
+    spreadsheetTitle: String(data.spreadsheetTitle ?? ''),
+    spreadsheetUrl: String(data.spreadsheetUrl ?? ''),
+    lastSyncedAt: data.lastSyncedAt ? String(data.lastSyncedAt) : null,
+    tabNames: Array.isArray(data.tabNames) ? data.tabNames.map(String) : [],
+  };
+}
+
 export function subscribeWorkspaceSettings(
-  onData: (config: SheetConfig | null) => void,
+  onData: (configs: CategorySheetConfigs) => void,
   onError: (err: Error) => void
 ): () => void {
-  const path = `${SETTINGS_COL}/${WORKSPACE_DOC_ID}`;
   return onSnapshot(
-    doc(db, SETTINGS_COL, WORKSPACE_DOC_ID),
-    (snap) => {
-      if (!snap.exists()) {
-        onData(null);
-        return;
+    collection(db, SETTINGS_COL),
+    (snapshot) => {
+      let permanent: SheetConfig | null = null;
+      let temporary: SheetConfig | null = null;
+      let legacy: SheetConfig | null = null;
+
+      for (const d of snapshot.docs) {
+        const data = d.data() as Record<string, unknown>;
+        if (!data?.spreadsheetId) continue;
+        if (d.id === 'workspace_permanent') {
+          permanent = docToSheetConfig(data, 'Sukhsa Export Permanent');
+        } else if (d.id === 'workspace_temporary') {
+          temporary = docToSheetConfig(data, 'Sukhsa Export Temporary');
+        } else if (d.id === LEGACY_WORKSPACE_DOC_ID) {
+          legacy = docToSheetConfig(data, 'Sukhsa Export Permanent');
+        }
       }
-      const data = snap.data();
+
       onData({
-        spreadsheetId: String(data.spreadsheetId ?? ''),
-        spreadsheetTitle: String(data.spreadsheetTitle ?? ''),
-        spreadsheetUrl: String(data.spreadsheetUrl ?? ''),
-        lastSyncedAt: data.lastSyncedAt ? String(data.lastSyncedAt) : null,
-        tabNames: Array.isArray(data.tabNames) ? data.tabNames.map(String) : [],
+        'Sukhsa Export Permanent': permanent ?? legacy,
+        'Sukhsa Export Temporary': temporary,
       });
     },
     (error) => {
       try {
-        handleFirestoreError(error, OperationType.GET, path);
+        handleFirestoreError(error, OperationType.LIST, SETTINGS_COL);
       } catch (wrapped) {
         onError(wrapped as Error);
       }
@@ -733,14 +764,22 @@ export async function adminDeleteAttendance(recordId: string): Promise<void> {
   }
 }
 
-export async function adminSaveSheetConfig(config: SheetConfig | null): Promise<void> {
-  const path = `${SETTINGS_COL}/${WORKSPACE_DOC_ID}`;
+export async function adminSaveSheetConfig(
+  category: CompanyCategory,
+  config: SheetConfig | null
+): Promise<void> {
+  const docId = getWorkspaceDocId(category);
+  const path = `${SETTINGS_COL}/${docId}`;
   try {
     if (!config) {
-      await deleteDoc(doc(db, SETTINGS_COL, WORKSPACE_DOC_ID));
+      await deleteDoc(doc(db, SETTINGS_COL, docId));
+      if (category === 'Sukhsa Export Permanent') {
+        await deleteDoc(doc(db, SETTINGS_COL, LEGACY_WORKSPACE_DOC_ID)).catch(() => {});
+      }
       return;
     }
-    await setDoc(doc(db, SETTINGS_COL, WORKSPACE_DOC_ID), {
+    await setDoc(doc(db, SETTINGS_COL, docId), {
+      companyCategory: category,
       spreadsheetId: config.spreadsheetId.slice(0, 128),
       spreadsheetTitle: config.spreadsheetTitle.slice(0, 200),
       spreadsheetUrl: config.spreadsheetUrl.slice(0, 300),
@@ -778,7 +817,8 @@ export async function adminMarkRecordsSynced(records: AttendanceRecord[]): Promi
 export async function adminImportFromSheet(
   employees: Employee[],
   records: AttendanceRecord[],
-  sheetConfig: SheetConfig
+  sheetConfig: SheetConfig,
+  category: CompanyCategory = 'Sukhsa Export Permanent'
 ): Promise<void> {
   try {
     for (let i = 0; i < employees.length; i += 450) {
@@ -787,7 +827,11 @@ export async function adminImportFromSheet(
         const safeId = emp.id.replace(/[^a-zA-Z0-9_-]/g, '') || `emp-${Date.now()}`;
         batch.set(
           doc(db, EMPLOYEES_COL, safeId),
-          sanitizeEmployeePayload({ ...emp, id: safeId })
+          sanitizeEmployeePayload({
+            ...emp,
+            id: safeId,
+            companyCategory: emp.companyCategory ?? category,
+          })
         );
       }
       await batch.commit();
@@ -830,7 +874,7 @@ export async function adminImportFromSheet(
       await batch.commit();
     }
 
-    await adminSaveSheetConfig(sheetConfig);
+    await adminSaveSheetConfig(category, { ...sheetConfig, companyCategory: category });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, SETTINGS_COL);
   }
