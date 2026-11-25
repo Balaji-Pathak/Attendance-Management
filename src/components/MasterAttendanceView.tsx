@@ -123,6 +123,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
     let totalThikada = 0;
     let totalPayable = 0;
     let pendingSync = 0;
+    const empMonthNetMinutes = new Map<string, { emp: Employee | undefined; month: string; netMins: number }>();
 
     for (const r of filteredRecords) {
       if (!r.syncedToSheet) pendingSync += 1;
@@ -133,9 +134,30 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         totalNormal += p.normalMinutes;
         totalThikada += p.thikadaMinutes;
         const emp = empLookupMap.get(r.empId) ?? empLookupMap.get(r.empCode);
-        const rate = getEmployeeHourlyRate(emp);
-        const workingHours = r.netDecimalHours ?? Number((r.netMinutes / 60).toFixed(2));
-        totalPayable += workingHours * rate;
+        if (!dateFilter && statusFilter === 'all') {
+          const ym = r.date.slice(0, 7);
+          const empKey = emp?.id ?? (r.empId || r.empCode);
+          const bucketKey = `${empKey}::${ym}`;
+          const prev = empMonthNetMinutes.get(bucketKey);
+          if (prev) {
+            prev.netMins += r.netMinutes;
+          } else {
+            empMonthNetMinutes.set(bucketKey, { emp, month: ym, netMins: r.netMinutes });
+          }
+        } else {
+          const rate = getEmployeeHourlyRate(emp);
+          const workingHours = r.netDecimalHours ?? Number((r.netMinutes / 60).toFixed(2));
+          totalPayable += workingHours * rate;
+        }
+      }
+    }
+
+    if (!dateFilter && statusFilter === 'all') {
+      for (const bucket of empMonthNetMinutes.values()) {
+        const rate = getEmployeeHourlyRate(bucket.emp);
+        const monthThekaMins = bucket.emp?.monthlyThikadaMinutes?.[bucket.month] ?? 0;
+        const payableMins = Math.max(0, bucket.netMins - monthThekaMins);
+        totalPayable += (payableMins / 60) * rate;
       }
     }
 
@@ -150,7 +172,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       totalPayable: Number(totalPayable.toFixed(2)),
       pendingSync,
     };
-  }, [filteredRecords, empLookupMap]);
+  }, [filteredRecords, empLookupMap, dateFilter, statusFilter]);
 
   const handleExportCSV = () => {
     const scopeSlug = dateFilter || monthFilter || 'all-months';
@@ -250,7 +272,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           </div>
         </div>
         <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-5 py-4">
-          <div className="text-xs font-medium text-emerald-800">Net Payable (Working × Rate)</div>
+          <div className="text-xs font-medium text-emerald-800">Net Payable ((Working − Theka) × Rate)</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-emerald-900 tabular-nums">
             {formatCurrencyINR(totals.totalPayable)}
           </div>

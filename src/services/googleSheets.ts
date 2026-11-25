@@ -322,7 +322,7 @@ function buildIndividualEmployeeRows(
     'Net Normal (H)',
     `=MAX(0, SUM(I5:I${lastDataRow})-F2)`,
     'Net Payable',
-    '=D2*H1',
+    '=MAX(0, D2-F2)*H1',
   ];
 
   const dataRows = empRecords.map((r, idx) => {
@@ -371,11 +371,11 @@ function buildIndividualEmployeeRows(
       '',
       '',
       '',
-      '',
+      `=-F2`,
       '',
       '',
       `=-F2`,
-      '',
+      `=-F2*$H$1`,
     ]);
     rows.push([
       'NET PAYABLE (After Theka)',
@@ -383,11 +383,11 @@ function buildIndividualEmployeeRows(
       '',
       '',
       '',
-      `=F${totalRowIdx}`,
+      `=MAX(0, F${totalRowIdx}-F2)`,
       `=G${totalRowIdx}`,
       `=H${totalRowIdx}`,
       `=MAX(0, I${totalRowIdx}-F2)`,
-      `=F${totalRowIdx}*$H$1`,
+      `=MAX(0, F${totalRowIdx}-F2)*$H$1`,
     ]);
   }
 

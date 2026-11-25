@@ -597,7 +597,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-600">
-                Pay calculation: Total Working Hours × Per Hour Rate. Break (30m) is deducted only for 4.5h+ shifts.
+                Pay calculation: (Total Working Hours − Theka Work) × Per Hour Rate. Break (30m) is deducted only for 4.5h+ shifts.
               </div>
 
               <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-4">
