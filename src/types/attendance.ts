@@ -26,6 +26,7 @@ export interface Employee {
   department: string;
   companyCategory?: CompanyCategory;
   breakMinutes: number; // Defaults to 30
+  hourlyRate?: number; // Per-hour wage rate
   active: boolean;
   individualSheetId?: string;
   individualSheetUrl?: string;

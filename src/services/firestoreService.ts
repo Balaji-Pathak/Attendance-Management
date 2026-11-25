@@ -67,6 +67,14 @@ function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
     active: Boolean(emp.active),
   };
 
+  if (
+    typeof emp.hourlyRate === 'number' &&
+    !Number.isNaN(emp.hourlyRate) &&
+    emp.hourlyRate >= 0
+  ) {
+    payload.hourlyRate = Math.min(1000000, Number(emp.hourlyRate.toFixed(2)));
+  }
+
   if (emp.individualSheetId && emp.individualSheetId.trim()) {
     payload.individualSheetId = emp.individualSheetId.trim().slice(0, 128);
   }
@@ -481,6 +489,10 @@ export function subscribeAllEmployees(
             department: String(data.department ?? 'General'),
             companyCategory: normalizedCategory,
             breakMinutes: typeof data.breakMinutes === 'number' ? data.breakMinutes : 30,
+            hourlyRate:
+              typeof data.hourlyRate === 'number' && !Number.isNaN(data.hourlyRate) && data.hourlyRate >= 0
+                ? Number(data.hourlyRate.toFixed(2))
+                : 0,
             active: data.active !== false,
             individualSheetId: data.individualSheetId
               ? String(data.individualSheetId)
@@ -591,6 +603,39 @@ export async function adminSaveEmployee(emp: Employee): Promise<void> {
     await setDoc(doc(db, EMPLOYEES_COL, safeId), sanitizeEmployeePayload({ ...emp, id: safeId }));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminDeleteEmployee(
+  employee: Employee,
+  empRecords: AttendanceRecord[]
+): Promise<void> {
+  const safeId = employee.id.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  const path = `${EMPLOYEES_COL}/${safeId}`;
+  try {
+    const recordIds = Array.from(new Set(empRecords.map((r) => r.id).filter(Boolean)));
+    if (recordIds.length === 0) {
+      await deleteDoc(doc(db, EMPLOYEES_COL, safeId));
+      return;
+    }
+
+    const firstChunk = recordIds.slice(0, 400);
+    const firstBatch = writeBatch(db);
+    firstBatch.delete(doc(db, EMPLOYEES_COL, safeId));
+    for (const rid of firstChunk) {
+      firstBatch.delete(doc(db, ATTENDANCE_COL, rid));
+    }
+    await firstBatch.commit();
+
+    for (let i = 400; i < recordIds.length; i += 450) {
+      const batch = writeBatch(db);
+      for (const rid of recordIds.slice(i, i + 450)) {
+        batch.delete(doc(db, ATTENDANCE_COL, rid));
+      }
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 

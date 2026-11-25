@@ -33,6 +33,10 @@
         "breakMinutes": {
           "type": "integer"
         },
+        "hourlyRate": {
+          "type": "number",
+          "description": "Hourly wage rate multiplied by total working hours for net payable calculation."
+        },
         "active": {
           "type": "boolean"
         },

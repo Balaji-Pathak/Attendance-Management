@@ -10,6 +10,7 @@ import {
   formatDisplayTime,
   formatMonthLabel,
   getDayNameShort,
+  getEmployeeHourlyRate,
   getEmployeeSheetTabName,
   getRecordPayroll,
   isSundayISO,
@@ -36,6 +37,8 @@ const MASTER_HEADERS = [
   'Present (P)',
   'Overtime (hrs)',
   'Normal Hours (H)',
+  'Hourly Rate',
+  'Payable Amount',
 ];
 
 const EMPLOYEES_HEADERS = [
@@ -43,6 +46,7 @@ const EMPLOYEES_HEADERS = [
   'Name',
   'Company Category',
   'Department',
+  'Hourly Rate',
   'Status',
   'Individual Sheet Link',
 ];
@@ -57,6 +61,7 @@ const INDIVIDUAL_HEADERS = [
   'Present (P)',
   'Overtime (hrs)',
   'Normal Hours (H)',
+  'Payable Amount',
 ];
 
 async function apiFetch<T>(url: string, token: string, init?: RequestInit): Promise<T> {
@@ -184,12 +189,11 @@ function buildMasterRows(
   records: AttendanceRecord[],
   employees: Employee[] = []
 ): (string | number)[][] {
-  const categoryByEmpId = new Map<string, string>();
-  const categoryByEmpCode = new Map<string, string>();
+  const empById = new Map<string, Employee>();
+  const empByCode = new Map<string, Employee>();
   for (const emp of employees) {
-    const cat = normalizeCompanyCategory(emp.companyCategory);
-    categoryByEmpId.set(emp.id, cat);
-    categoryByEmpCode.set(emp.empCode, cat);
+    empById.set(emp.id, emp);
+    empByCode.set(emp.empCode, emp);
   }
 
   const sorted = [...records].sort((a, b) => {
@@ -199,13 +203,13 @@ function buildMasterRows(
 
   return [
     MASTER_HEADERS,
-    ...sorted.map((r) => {
+    ...sorted.map((r, idx) => {
       const p = getRecordPayroll(r);
       const hasOut = Boolean(r.outTime && r.netMinutes !== null);
-      const companyCat =
-        categoryByEmpId.get(r.empId) ??
-        categoryByEmpCode.get(r.empCode) ??
-        normalizeCompanyCategory(undefined);
+      const matchedEmp = empById.get(r.empId) ?? empByCode.get(r.empCode);
+      const companyCat = normalizeCompanyCategory(matchedEmp?.companyCategory);
+      const rate = getEmployeeHourlyRate(matchedEmp);
+      const rowNum = idx + 2;
       return [
         r.date,
         getDayNameShort(r.date),
@@ -219,6 +223,8 @@ function buildMasterRows(
         hasOut ? p.presentCount : '',
         hasOut ? p.overtimeDecimalHours : '',
         hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
+        rate,
+        hasOut ? `=I${rowNum}*M${rowNum}` : '',
       ];
     }),
   ];
@@ -232,6 +238,7 @@ function buildEmployeesRows(employees: Employee[]): (string | number)[][] {
       e.name,
       normalizeCompanyCategory(e.companyCategory),
       e.department,
+      getEmployeeHourlyRate(e),
       e.active ? 'Active' : 'Inactive',
       e.individualSheetUrl ?? '',
     ]),
@@ -290,6 +297,7 @@ function buildIndividualEmployeeRows(
   const lastDataRow = empRecords.length > 0 ? 4 + empRecords.length : 5;
   const monthlyThekaDec = getMonthlyThekaDecimal(employee, monthFilter);
   const periodLabel = monthFilter ? formatMonthLabel(monthFilter) : 'All Months';
+  const empRate = getEmployeeHourlyRate(employee);
 
   const bannerRow1: (string | number)[] = [
     'Company',
@@ -298,9 +306,10 @@ function buildIndividualEmployeeRows(
     `${employee.empCode} - ${employee.name}`,
     'Period',
     periodLabel,
+    'Hourly Rate',
+    empRate,
     'Shift Rule',
     '8h=1 P | <8h/OT/Sun=H',
-    '',
   ];
 
   const bannerRow2: (string | number)[] = [
@@ -312,12 +321,14 @@ function buildIndividualEmployeeRows(
     monthlyThekaDec,
     'Net Normal (H)',
     `=MAX(0, SUM(I5:I${lastDataRow})-F2)`,
-    '',
+    'Net Payable',
+    '=D2*H1',
   ];
 
-  const dataRows = empRecords.map((r) => {
+  const dataRows = empRecords.map((r, idx) => {
     const p = getRecordPayroll(r);
     const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+    const rowNum = 5 + idx;
     return [
       r.date,
       getDayNameShort(r.date),
@@ -328,6 +339,7 @@ function buildIndividualEmployeeRows(
       hasOut ? p.presentCount : '',
       hasOut ? p.overtimeDecimalHours : '',
       hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
+      hasOut ? `=F${rowNum}*$H$1` : '',
     ];
   });
 
@@ -351,6 +363,7 @@ function buildIndividualEmployeeRows(
       `=SUM(G5:G${lastDataRow})`,
       `=SUM(H5:H${lastDataRow})`,
       `=SUM(I5:I${lastDataRow})`,
+      `=SUM(J5:J${lastDataRow})`,
     ]);
     rows.push([
       'Less: Theka Work (H)',
@@ -362,6 +375,7 @@ function buildIndividualEmployeeRows(
       '',
       '',
       `=-F2`,
+      '',
     ]);
     rows.push([
       'NET PAYABLE (After Theka)',
@@ -373,6 +387,7 @@ function buildIndividualEmployeeRows(
       `=G${totalRowIdx}`,
       `=H${totalRowIdx}`,
       `=MAX(0, I${totalRowIdx}-F2)`,
+      `=F${totalRowIdx}*$H$1`,
     ]);
   }
 
@@ -390,7 +405,7 @@ async function formatSheetHeaders(
     const isIndividual = s.title !== MASTER_TAB_NAME && s.title !== EMPLOYEES_TAB_NAME;
     const headerRowIndex = isIndividual ? 3 : 0;
     const freezeCount = isIndividual ? 4 : 1;
-    const colCount = isIndividual ? 9 : s.title === MASTER_TAB_NAME ? 12 : 6;
+    const colCount = isIndividual ? 10 : s.title === MASTER_TAB_NAME ? 14 : 7;
 
     requests.push({
       updateSheetProperties: {
@@ -425,6 +440,44 @@ async function formatSheetHeaders(
       },
     });
 
+    if (s.title === MASTER_TAB_NAME) {
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 2000,
+            startColumnIndex: 12,
+            endColumnIndex: 14,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+            },
+          },
+          fields: 'userEnteredFormat.numberFormat',
+        },
+      });
+    } else if (s.title === EMPLOYEES_TAB_NAME) {
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 500,
+            startColumnIndex: 4,
+            endColumnIndex: 5,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+            },
+          },
+          fields: 'userEnteredFormat.numberFormat',
+        },
+      });
+    }
+
     if (isIndividual) {
       requests.push({
         repeatCell: {
@@ -433,7 +486,7 @@ async function formatSheetHeaders(
             startRowIndex: 0,
             endRowIndex: 2,
             startColumnIndex: 0,
-            endColumnIndex: 9,
+            endColumnIndex: 10,
           },
           cell: {
             userEnteredFormat: {
@@ -442,6 +495,25 @@ async function formatSheetHeaders(
             },
           },
           fields: 'userEnteredFormat(backgroundColor,textFormat)',
+        },
+      });
+
+      // Format H1 (Hourly Rate) cleanly
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 7,
+            endColumnIndex: 8,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+            },
+          },
+          fields: 'userEnteredFormat.numberFormat',
         },
       });
 
@@ -494,13 +566,38 @@ async function formatSheetHeaders(
         },
       });
 
+      // Highlight J2 (Net Payable = Total Working * Hourly Rate) in banner
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 1,
+            endRowIndex: 2,
+            startColumnIndex: 9,
+            endColumnIndex: 10,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.90, green: 0.98, blue: 0.94 },
+              textFormat: {
+                foregroundColor: { red: 0.04, green: 0.42, blue: 0.28 },
+                bold: true,
+                fontSize: 10,
+              },
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,numberFormat)',
+        },
+      });
+
       if (typeof s.dataRowCount === 'number' && s.dataRowCount > 0) {
         const bodyStart = 4;
         const totalRowIdx = 4 + s.dataRowCount;
         const thekaRowIdx = totalRowIdx + 1;
         const netPayableRowIdx = totalRowIdx + 2;
 
-        // Reset data area formatting cleanly (including any leftover columns J-L)
+        // Reset data area formatting cleanly (including any leftover columns K-N)
         requests.push({
           repeatCell: {
             range: {
@@ -508,7 +605,7 @@ async function formatSheetHeaders(
               startRowIndex: bodyStart,
               endRowIndex: netPayableRowIdx + 20,
               startColumnIndex: 0,
-              endColumnIndex: 12,
+              endColumnIndex: 14,
             },
             cell: {
               userEnteredFormat: {
@@ -524,6 +621,25 @@ async function formatSheetHeaders(
           },
         });
 
+        // Format Payable Amount column (Col J) across data & summary rows
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: netPayableRowIdx + 1,
+              startColumnIndex: 9,
+              endColumnIndex: 10,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        });
+
         // TOTAL (Before Theka) row
         requests.push({
           repeatCell: {
@@ -532,7 +648,7 @@ async function formatSheetHeaders(
               startRowIndex: totalRowIdx,
               endRowIndex: totalRowIdx + 1,
               startColumnIndex: 0,
-              endColumnIndex: 9,
+              endColumnIndex: 10,
             },
             cell: {
               userEnteredFormat: {
@@ -552,7 +668,7 @@ async function formatSheetHeaders(
               startRowIndex: thekaRowIdx,
               endRowIndex: thekaRowIdx + 1,
               startColumnIndex: 0,
-              endColumnIndex: 9,
+              endColumnIndex: 10,
             },
             cell: {
               userEnteredFormat: {
@@ -576,7 +692,7 @@ async function formatSheetHeaders(
               startRowIndex: netPayableRowIdx,
               endRowIndex: netPayableRowIdx + 1,
               startColumnIndex: 0,
-              endColumnIndex: 9,
+              endColumnIndex: 10,
             },
             cell: {
               userEnteredFormat: {
@@ -701,7 +817,8 @@ export async function syncFullWorkbook(
   spreadsheetId: string,
   employees: Employee[],
   records: AttendanceRecord[],
-  companyCategory?: CompanyCategory
+  companyCategory?: CompanyCategory,
+  extraTabsToRemove: string[] = []
 ): Promise<SheetConfig> {
   const scoped = filterByCompanyCategory(employees, records, companyCategory);
   const scopedEmps = scoped.employees;
@@ -716,12 +833,15 @@ export async function syncFullWorkbook(
     ...scopedEmps.map((e) => getEmployeeSheetTabName(e.empCode, e.name)),
   ];
   const requiredSet = new Set(requiredTabs);
+  const extraRemoveSet = new Set(extraTabsToRemove);
 
   const missingTabs = requiredTabs.filter((t) => !existingTitles.has(t));
   const staleOtherTabs = meta.sheets.filter(
     (s) =>
-      scoped.otherTabNames.has(s.properties.title) &&
-      !requiredSet.has(s.properties.title)
+      !requiredSet.has(s.properties.title) &&
+      (scoped.otherTabNames.has(s.properties.title) ||
+        extraRemoveSet.has(s.properties.title) ||
+        /^[A-Za-z0-9]+-[A-Za-z0-9_-]*\s+-\s+/.test(s.properties.title))
   );
 
   if (missingTabs.length > 0 || staleOtherTabs.length > 0) {
@@ -1384,10 +1504,10 @@ export async function loadWorkbookData(
 
   const rangesToFetch: string[] = [];
   if (tabNames.includes(EMPLOYEES_TAB_NAME)) {
-    rangesToFetch.push(`'${EMPLOYEES_TAB_NAME}'!A1:F2000`);
+    rangesToFetch.push(`'${EMPLOYEES_TAB_NAME}'!A1:G2000`);
   }
   if (tabNames.includes(MASTER_TAB_NAME)) {
-    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:M5000`);
+    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:O5000`);
   }
 
   const employees: Employee[] = [];
@@ -1405,6 +1525,10 @@ export async function loadWorkbookData(
         const empHeader = (rows[0] ?? []).map((c) => String(c || '').trim().toLowerCase());
         const hasHeader = empHeader.some((c) => c.includes('employee id') || c === 'name');
         const hasCompanyCol = empHeader.some((c) => c.includes('company'));
+        const rateIdx = empHeader.findIndex((c) => c.includes('rate'));
+        const statusIdx = empHeader.findIndex((c) => c === 'status');
+        const linkIdx = empHeader.findIndex((c) => c.includes('link') || c.includes('sheet'));
+        const deptIdx = empHeader.findIndex((c) => c.includes('department'));
         const dataRows = hasHeader ? rows.slice(1) : rows;
         for (const row of dataRows) {
           if (!row[0] && !row[1]) continue;
@@ -1413,9 +1537,17 @@ export async function loadWorkbookData(
           const companyCategory = hasCompanyCol
             ? normalizeCompanyCategory(row[2])
             : normalizeCompanyCategory(undefined);
-          const department = String((hasCompanyCol ? row[3] : row[2]) || 'General').trim();
-          const activeRaw = String((hasCompanyCol ? row[4] : row[3]) || 'Active').toLowerCase();
-          const sheetUrlRaw = hasCompanyCol ? row[5] : row[4];
+          const department = String(
+            (deptIdx !== -1 ? row[deptIdx] : hasCompanyCol ? row[3] : row[2]) || 'General'
+          ).trim();
+          const rateRaw = rateIdx !== -1 ? Number(row[rateIdx]) : 0;
+          const hourlyRate =
+            !Number.isNaN(rateRaw) && rateRaw > 0 ? Number(rateRaw.toFixed(2)) : 0;
+          const activeRaw = String(
+            (statusIdx !== -1 ? row[statusIdx] : hasCompanyCol ? row[4] : row[3]) || 'Active'
+          ).toLowerCase();
+          const sheetUrlRaw =
+            linkIdx !== -1 ? row[linkIdx] : hasCompanyCol ? row[5] : row[4];
           const sheetUrl = sheetUrlRaw ? String(sheetUrlRaw).trim() : undefined;
           employees.push({
             id: `emp-${empCode.toLowerCase().replace(/[^a-z0-9_-]/g, '') || Date.now()}`,
@@ -1424,6 +1556,7 @@ export async function loadWorkbookData(
             department,
             companyCategory,
             breakMinutes: 30,
+            hourlyRate,
             active: activeRaw !== 'inactive',
             individualSheetId: sheetUrl ? extractSpreadsheetId(sheetUrl) : undefined,
             individualSheetUrl: sheetUrl,

@@ -22,10 +22,12 @@ import {
 import {
   calculateShiftMetrics,
   downloadCSV,
+  formatCurrencyINR,
   formatDisplayTime,
   formatMonthLabel,
   getCurrentYearMonth,
   getDayNameShort,
+  getEmployeeHourlyRate,
   getEmployeeSheetTabName,
   getMonthDays,
   getRecordPayroll,
@@ -163,9 +165,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       });
   }, [records, selectedEmployee]);
 
+  const selectedEmpRate = useMemo(
+    () => getEmployeeHourlyRate(selectedEmployee),
+    [selectedEmployee]
+  );
+
   // Group saved records by YYYY-MM for clean Overview rows
   const savedMonthSummaries = useMemo(() => {
     if (!selectedEmployee) return [];
+    const rate = getEmployeeHourlyRate(selectedEmployee);
     const byMonth = new Map<string, AttendanceRecord[]>();
     for (const r of allEmployeeRecords) {
       const ym = r.date.slice(0, 7);
@@ -195,6 +203,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
       const monthThekaMinutes = selectedEmployee.monthlyThikadaMinutes?.[ym] ?? 0;
       const netNormalMinutes = Math.max(0, grossNormalMinutes - monthThekaMinutes);
+      const netDecimal = Number((netMinutes / 60).toFixed(2));
+      const netPayable = Number(((netMinutes / 60) * rate).toFixed(2));
 
       return {
         yearMonth: ym,
@@ -202,16 +212,18 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         entries: list.length,
         presentCount,
         netMinutes,
-        netDecimal: Number((netMinutes / 60).toFixed(2)),
+        netDecimal,
         overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
         thekaDecimal: Number((monthThekaMinutes / 60).toFixed(2)),
         netNormalMinutes,
         netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
+        netPayable,
       };
     });
   }, [allEmployeeRecords, selectedEmployee]);
 
   const overallSummary = useMemo(() => {
+    const rate = getEmployeeHourlyRate(selectedEmployee);
     if (!overviewMonth) {
       let presentCount = 0;
       let netMinutes = 0;
@@ -230,6 +242,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         netDecimal: Number((netMinutes / 60).toFixed(2)),
         thekaDecimal: Number((totalThekaMinutes / 60).toFixed(2)),
         netNormalDecimal: Number((netNormalMinutes / 60).toFixed(2)),
+        netPayable: Number(((netMinutes / 60) * rate).toFixed(2)),
         monthsCount: savedMonthSummaries.length,
       };
     }
@@ -241,6 +254,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         netDecimal: matched.netDecimal,
         thekaDecimal: matched.thekaDecimal,
         netNormalDecimal: matched.netNormalDecimal,
+        netPayable: matched.netPayable,
         monthsCount: 1,
       };
     }
@@ -251,6 +265,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       netDecimal: 0,
       thekaDecimal: Number((monthThekaMinutes / 60).toFixed(2)),
       netNormalDecimal: 0,
+      netPayable: 0,
       monthsCount: 0,
     };
   }, [savedMonthSummaries, overviewMonth, selectedEmployee]);
@@ -267,6 +282,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   }, [allEmployeeRecords, selectedEmployee, historyMonth]);
 
   const historyTotals = useMemo(() => {
+    const rate = getEmployeeHourlyRate(selectedEmployee);
     let totalAwayMins = 0;
     let netMinutes = 0;
     let presentCount = 0;
@@ -286,12 +302,14 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
 
     const monthlyThekaMinutes = selectedEmployee?.monthlyThikadaMinutes?.[historyMonth] ?? 0;
     const finalNetNormalMinutes = Math.max(0, grossNormalMinutes - monthlyThekaMinutes);
+    const netDecimal = Number((netMinutes / 60).toFixed(2));
+    const netPayable = Number(((netMinutes / 60) * rate).toFixed(2));
 
     return {
       entries: historyMonthRecords.length,
       totalAwayMins,
       netMinutes,
-      netDecimal: Number((netMinutes / 60).toFixed(2)),
+      netDecimal,
       presentCount,
       overtimeMinutes,
       overtimeDecimal: Number((overtimeMinutes / 60).toFixed(2)),
@@ -300,6 +318,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       grossNormalDecimal: Number((grossNormalMinutes / 60).toFixed(2)),
       finalNetNormalMinutes,
       finalNetNormalDecimal: Number((finalNetNormalMinutes / 60).toFixed(2)),
+      hourlyRate: rate,
+      netPayable,
     };
   }, [historyMonthRecords, selectedEmployee, historyMonth]);
 
@@ -526,6 +546,10 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         hasOut ? p.presentCount : '',
         hasOut ? p.overtimeDecimalHours : '',
         hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
+        selectedEmpRate,
+        hasOut && r.netDecimalHours !== null
+          ? Number((r.netDecimalHours * selectedEmpRate).toFixed(2))
+          : '',
       ];
     });
 
@@ -539,6 +563,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       historyTotals.presentCount,
       historyTotals.overtimeDecimal,
       historyTotals.grossNormalDecimal,
+      selectedEmpRate,
+      historyTotals.netPayable,
     ]);
     csvRows.push([
       'Less: Theka Work (H)',
@@ -550,6 +576,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       '',
       '',
       -historyTotals.monthlyThekaDecimal,
+      '',
+      '',
     ]);
     csvRows.push([
       'NET PAYABLE',
@@ -561,6 +589,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       historyTotals.presentCount,
       historyTotals.overtimeDecimal,
       historyTotals.finalNetNormalDecimal,
+      selectedEmpRate,
+      historyTotals.netPayable,
     ]);
 
     downloadCSV(
@@ -575,6 +605,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         'Present (P)',
         'Overtime (hrs)',
         'Normal Hours (H)',
+        'Hourly Rate',
+        'Payable Amount',
       ],
       csvRows
     );
@@ -761,13 +793,19 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                 <span className="font-medium text-teal-800">
                   {normalizeCompanyCategory(selectedEmployee.companyCategory)}
                 </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono font-semibold text-slate-800">
+                  {selectedEmpRate > 0
+                    ? `Rate: ${formatCurrencyINR(selectedEmpRate)}/hr`
+                    : 'Rate: Not set'}
+                </span>
               </div>
               <h2 className="mt-1 text-xl font-bold text-slate-900">
                 {selectedEmployee.name}
               </h2>
               <p className="mt-1 text-xs text-slate-500">
                 8h+ Mon–Sat = 1 Present (P) · &lt;8h, Overtime (&gt;8h) &amp; Sunday = Normal Hours
-                (H) · Month-end Theka deducted from H
+                (H) · Net Payable = Total Working Hours × Per Hour Rate
               </p>
             </div>
 
@@ -952,7 +990,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
             <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
               <div className="text-xs font-medium text-slate-500">Present (P)</div>
               <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
@@ -975,6 +1013,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
               <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
               <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
                 {overallSummary.netDecimal.toFixed(2)}h
+              </div>
+            </div>
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-5 py-4">
+              <div className="text-xs font-medium text-emerald-900">
+                Net Payable
+                {selectedEmpRate > 0 ? ` (@ ${formatCurrencyINR(selectedEmpRate)}/hr)` : ''}
+              </div>
+              <div className="mt-1.5 font-mono text-2xl font-bold text-emerald-800 tabular-nums">
+                {formatCurrencyINR(overallSummary.netPayable)}
               </div>
             </div>
           </div>
@@ -1019,6 +1066,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                     <th className="px-4 py-3 text-right whitespace-nowrap">Overtime</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Theka Deducted</th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">Net Normal (H)</th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">Net Payable</th>
                     <th className="px-6 py-3 text-right whitespace-nowrap">Action</th>
                   </tr>
                 </thead>
@@ -1045,6 +1093,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold text-amber-700 tabular-nums whitespace-nowrap">
                         {m.netNormalDecimal.toFixed(2)}h
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-bold text-emerald-800 tabular-nums whitespace-nowrap">
+                        {formatCurrencyINR(m.netPayable)}
                       </td>
                       <td className="px-6 py-3.5 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-2">
@@ -1178,8 +1229,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             ) : (
               <>
                 {/* Monthly Summary + Month-End Theka Deduction Control */}
-                <div className="border-b border-slate-200 bg-white px-6 py-4 grid grid-cols-1 gap-4 md:grid-cols-12 items-center">
-                  <div className="md:col-span-7 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
+                <div className="border-b border-slate-200 bg-white px-6 py-4 grid grid-cols-1 gap-4 lg:grid-cols-12 items-center">
+                  <div className="lg:col-span-8 grid grid-cols-2 gap-2.5 sm:grid-cols-5 text-xs">
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <div className="text-slate-500">Present (P)</div>
                       <div className="mt-0.5 font-mono text-base font-semibold text-slate-900 tabular-nums">
@@ -1187,26 +1238,37 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                       </div>
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <div className="text-slate-500">Hours Before Theka</div>
-                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-800 tabular-nums">
-                        {historyTotals.grossNormalDecimal.toFixed(2)}h
+                      <div className="text-slate-500">Total Working</div>
+                      <div className="mt-0.5 font-mono text-base font-semibold text-teal-800 tabular-nums">
+                        {historyTotals.netDecimal.toFixed(2)}h
                       </div>
                     </div>
                     <div className="rounded-lg border border-red-200 bg-red-50/50 px-3 py-2">
-                      <div className="text-red-800">Theka Working Time</div>
+                      <div className="text-red-800">Theka Working</div>
                       <div className="mt-0.5 font-mono text-base font-semibold text-red-700 tabular-nums">
                         -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
                       </div>
                     </div>
                     <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
-                      <div className="text-amber-900 font-semibold">Normal Working (H)</div>
+                      <div className="text-amber-900 font-semibold">Net Normal (H)</div>
                       <div className="mt-0.5 font-mono text-base font-bold text-amber-800 tabular-nums">
                         {historyTotals.finalNetNormalDecimal.toFixed(2)}h
                       </div>
                     </div>
+                    <div className="col-span-2 sm:col-span-1 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2">
+                      <div className="text-emerald-900 font-semibold">
+                        Net Payable
+                        {historyTotals.hourlyRate > 0
+                          ? ` (@ ${formatCurrencyINR(historyTotals.hourlyRate)})`
+                          : ''}
+                      </div>
+                      <div className="mt-0.5 font-mono text-base font-bold text-emerald-800 tabular-nums">
+                        {formatCurrencyINR(historyTotals.netPayable)}
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="md:col-span-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="lg:col-span-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <div className="text-[11px] font-semibold text-slate-800">
                       Month-End Theka Working Hours (Deducted from Normal H)
                     </div>
@@ -1222,7 +1284,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                           setThekaFeedback(null);
                         }}
                         aria-label="Month-end Theka working hours deduction"
-                        className="w-28 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
+                        className="w-24 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none tabular-nums"
                       />
                       <span className="text-xs text-slate-500">hrs</span>
                       <button
@@ -1261,6 +1323,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">OT</th>
                         <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
                           Normal (H)
+                        </th>
+                        <th className="px-3 py-2.5 font-medium text-right whitespace-nowrap">
+                          Payable
                         </th>
                         <th className="px-3 py-2.5 font-medium whitespace-nowrap">Status</th>
                         <th className="px-4 py-2.5 font-medium text-right whitespace-nowrap">
@@ -1402,6 +1467,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                                 <span className="text-slate-400">0.00h</span>
                               )}
                             </td>
+                            <td className="px-3 py-2.5 text-right font-mono font-semibold text-emerald-800 tabular-nums whitespace-nowrap">
+                              {hasOut && displayNet !== null
+                                ? formatCurrencyINR(displayNet * selectedEmpRate)
+                                : '—'}
+                            </td>
                             <td className="px-3 py-2.5 whitespace-nowrap">
                               <StatusLabel status={previewCalc ? previewCalc.status : r.status} />
                             </td>
@@ -1464,6 +1534,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-slate-900">
                           {historyTotals.grossNormalDecimal.toFixed(2)}h
                         </td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-emerald-800">
+                          {formatCurrencyINR(historyTotals.netPayable)}
+                        </td>
                         <td className="px-3 py-2.5" />
                         <td className="px-4 py-2.5" />
                       </tr>
@@ -1474,11 +1547,14 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap font-semibold text-red-700">
                           -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
                         </td>
-                        <td colSpan={2} />
+                        <td colSpan={3} />
                       </tr>
                       <tr className="border-t border-slate-300 bg-amber-50/70 font-mono text-xs font-bold text-slate-900">
-                        <td colSpan={6} className="px-4 py-2.5 text-right font-sans">
-                          FINAL NET PAYABLE (P &amp; H)
+                        <td colSpan={5} className="px-4 py-2.5 text-right font-sans">
+                          FINAL NET PAYABLE (Working × {formatCurrencyINR(selectedEmpRate)}/hr)
+                        </td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-teal-800">
+                          {historyTotals.netDecimal.toFixed(2)}h
                         </td>
                         <td className="px-3 py-2.5 text-center tabular-nums whitespace-nowrap text-teal-900">
                           {historyTotals.presentCount} P
@@ -1486,6 +1562,9 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         <td className="px-3 py-2.5" />
                         <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-amber-800">
                           {historyTotals.finalNetNormalDecimal.toFixed(2)}h
+                        </td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap text-emerald-800">
+                          {formatCurrencyINR(historyTotals.netPayable)}
                         </td>
                         <td colSpan={2} />
                       </tr>
@@ -1800,6 +1879,12 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   <span className="text-slate-500">Normal (H): </span>
                   <span className="font-mono font-semibold text-amber-700 tabular-nums">
                     {(builderTotals.normalMinutes / 60).toFixed(2)}h
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Payable: </span>
+                  <span className="font-mono font-semibold text-emerald-800 tabular-nums">
+                    {formatCurrencyINR((builderTotals.netMinutes / 60) * selectedEmpRate)}
                   </span>
                 </div>
               </div>

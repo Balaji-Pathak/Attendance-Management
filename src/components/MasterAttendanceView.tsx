@@ -11,12 +11,14 @@ import {
 import {
   calculateShiftMetrics,
   downloadCSV,
+  formatCurrencyINR,
   formatDisplayDate,
   formatDisplayTime,
   formatDurationHM,
   formatMonthLabel,
   getCurrentYearMonth,
   getDayNameShort,
+  getEmployeeHourlyRate,
   getRecordPayroll,
   normalizeCompanyCategory,
 } from '../utils/time';
@@ -48,6 +50,15 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   const [statusFilter, setStatusFilter] = useState('all');
   const [editing, setEditing] = useState<AttendanceRecord | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  const empLookupMap = useMemo(() => {
+    const map = new Map<string, Employee>();
+    for (const emp of employees) {
+      map.set(emp.id, emp);
+      map.set(emp.empCode, emp);
+    }
+    return map;
+  }, [employees]);
 
   const empCategoryMap = useMemo(() => {
     const map = new Map<string, CompanyCategory>();
@@ -109,6 +120,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
     let totalNet = 0;
     let totalNormal = 0;
     let totalThikada = 0;
+    let totalPayable = 0;
     let pendingSync = 0;
 
     for (const r of filteredRecords) {
@@ -119,6 +131,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         totalPresent += p.presentCount;
         totalNormal += p.normalMinutes;
         totalThikada += p.thikadaMinutes;
+        const emp = empLookupMap.get(r.empId) ?? empLookupMap.get(r.empCode);
+        const rate = getEmployeeHourlyRate(emp);
+        const workingHours = r.netDecimalHours ?? Number((r.netMinutes / 60).toFixed(2));
+        totalPayable += workingHours * rate;
       }
     }
 
@@ -130,9 +146,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       totalNormal,
       totalNormalDecimal: Number((totalNormal / 60).toFixed(2)),
       totalThikadaDecimal: Number((totalThikada / 60).toFixed(2)),
+      totalPayable: Number(totalPayable.toFixed(2)),
       pendingSync,
     };
-  }, [filteredRecords]);
+  }, [filteredRecords, empLookupMap]);
 
   const handleExportCSV = () => {
     const scopeSlug = dateFilter || monthFilter || 'all-months';
@@ -151,14 +168,21 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         'Present (P)',
         'Overtime (hrs)',
         'Normal Hours (H)',
+        'Hourly Rate (INR)',
+        'Payable Amount (INR)',
       ],
       filteredRecords.map((r) => {
         const p = getRecordPayroll(r);
         const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+        const emp = empLookupMap.get(r.empId) ?? empLookupMap.get(r.empCode);
         const companyCategory =
           empCategoryMap.get(r.empId) ??
           empCategoryMap.get(r.empCode) ??
           DEFAULT_COMPANY_CATEGORY;
+        const rate = getEmployeeHourlyRate(emp);
+        const workingHours =
+          r.netDecimalHours ?? (r.netMinutes !== null ? Number((r.netMinutes / 60).toFixed(2)) : 0);
+        const payableAmount = hasOut ? Number((workingHours * rate).toFixed(2)) : '';
         return [
           r.date,
           getDayNameShort(r.date),
@@ -172,6 +196,8 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           hasOut ? p.presentCount : '',
           hasOut ? p.overtimeDecimalHours : '',
           hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
+          rate,
+          payableAmount,
         ];
       })
     );
@@ -203,7 +229,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Summary Strip */}
-      <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
           <div className="text-xs font-medium text-slate-500">Present Days (P)</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
@@ -220,6 +246,12 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
           <div className="text-xs font-medium text-slate-500">Normal Hours (H)</div>
           <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
             {totals.totalNormalDecimal.toFixed(2)}h
+          </div>
+        </div>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-5 py-4">
+          <div className="text-xs font-medium text-emerald-800">Net Payable (Working × Rate)</div>
+          <div className="mt-1.5 font-mono text-2xl font-semibold text-emerald-900 tabular-nums">
+            {formatCurrencyINR(totals.totalPayable)}
           </div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
@@ -374,7 +406,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                 className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                <span>Sync to Google Sheet</span>
+                <span>Update Mega Sheet</span>
               </button>
             )}
           </div>
@@ -410,6 +442,8 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-4 py-3 text-right whitespace-nowrap">Working Hours</th>
                   <th className="px-4 py-3 text-center whitespace-nowrap">P</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Normal (H)</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Rate (/hr)</th>
+                  <th className="px-4 py-3 text-right whitespace-nowrap">Payable</th>
                   <th className="px-4 py-3 whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-right whitespace-nowrap">Admin</th>
                 </tr>
@@ -420,6 +454,12 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   const awayMins = Math.round((rec.pausedTotalSeconds ?? 0) / 60);
                   const hasOut = Boolean(rec.outTime && rec.netMinutes !== null);
                   const dayNormalHrs = Number((p.grossNormalMinutes / 60).toFixed(2));
+                  const emp = empLookupMap.get(rec.empId) ?? empLookupMap.get(rec.empCode);
+                  const rate = getEmployeeHourlyRate(emp);
+                  const workingHrs =
+                    rec.netDecimalHours ??
+                    (rec.netMinutes !== null ? Number((rec.netMinutes / 60).toFixed(2)) : 0);
+                  const dayPayable = hasOut ? Number((workingHrs * rate).toFixed(2)) : 0;
                   const companyCategory =
                     empCategoryMap.get(rec.empId) ??
                     empCategoryMap.get(rec.empCode) ??
@@ -482,6 +522,16 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                           <span className="text-amber-700">{dayNormalHrs.toFixed(2)}h</span>
                         ) : (
                           <span className="text-slate-400">0.00h</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
+                        {rate > 0 ? formatCurrencyINR(rate) : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right font-mono text-xs font-semibold tabular-nums whitespace-nowrap">
+                        {hasOut && rate > 0 ? (
+                          <span className="text-emerald-800">{formatCurrencyINR(dayPayable)}</span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
                         )}
                       </td>
                       <td className="px-4 py-3.5 whitespace-nowrap">

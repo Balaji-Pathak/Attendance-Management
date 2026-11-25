@@ -16,6 +16,24 @@ export function normalizeCompanyCategory(raw?: unknown): CompanyCategory {
   return DEFAULT_COMPANY_CATEGORY;
 }
 
+export function getEmployeeHourlyRate(
+  emp?: Pick<Employee, 'hourlyRate'> | null
+): number {
+  const rate = emp?.hourlyRate;
+  if (typeof rate === 'number' && !Number.isNaN(rate) && rate > 0) {
+    return Number(rate.toFixed(2));
+  }
+  return 0;
+}
+
+export function formatCurrencyINR(amount: number): string {
+  const safe = Number.isFinite(amount) ? amount : 0;
+  return `₹${safe.toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export function getBrowserTimeZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';

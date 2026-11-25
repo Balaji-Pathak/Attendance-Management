@@ -48,6 +48,7 @@ import {
   adminAddEmail,
   adminBackfillEmployeeCompanyCategories,
   adminDeleteAttendance,
+  adminDeleteEmployee,
   adminImportFromSheet,
   adminLoadStarterEmployees,
   adminMarkRecordsSynced,
@@ -617,12 +618,11 @@ export default function App() {
       message: `${isNew ? 'Added' : 'Updated'} ${normalizedEmp.name} (${newCat}).`,
     });
 
-    const token = getAccessToken();
     const oldMasterCfg = categoryChanged && prevCat ? sheetConfigs[prevCat] : null;
     const newMasterCfg = sheetConfigs[newCat];
     const hasStandalone = Boolean(normalizedEmp.individualSheetId);
 
-    if (token && (oldMasterCfg || newMasterCfg || hasStandalone)) {
+    if (oldMasterCfg || newMasterCfg || hasStandalone) {
       const details: string[] = [];
       if (oldMasterCfg && prevCat) {
         details.push(
@@ -662,7 +662,7 @@ export default function App() {
         details,
         confirmLabel: 'Update Sheets',
         onConfirm: async () => {
-          const activeToken = getAccessToken();
+          const activeToken = getAccessToken() || (await ensureGoogleToken());
           if (!activeToken) return;
           setIsSyncing(true);
           try {
@@ -725,6 +725,111 @@ export default function App() {
 
   const handleToggleActive = async (emp: Employee) => {
     await handleSaveEmployee({ ...emp, active: !emp.active }, false);
+  };
+
+  const handleDeleteEmployee = (emp: Employee) => {
+    const empCategory = normalizeCompanyCategory(emp.companyCategory);
+    const otherCategory = COMPANY_CATEGORIES.find((c) => c !== empCategory);
+    const matchesEmployeeRecord = (r: AttendanceRecord) =>
+      r.empId === emp.id || (!r.empId && r.empCode === emp.empCode);
+    const empRecords = records.filter(matchesEmployeeRecord);
+    const empTabName = getEmployeeSheetTabName(emp.empCode, emp.name);
+    const targetMasterCfg = sheetConfigs[empCategory];
+    const otherMasterCfg = otherCategory ? sheetConfigs[otherCategory] : null;
+    const shouldSyncOtherMaster = Boolean(
+      otherMasterCfg && otherMasterCfg.tabNames.includes(empTabName)
+    );
+    const needsSheetSync = Boolean(
+      targetMasterCfg || shouldSyncOtherMaster || emp.individualSheetId
+    );
+
+    const details: string[] = [
+      `Removes ${emp.name} (${emp.empCode}) permanently from Employees & Guard Gate Desk`,
+      `Deletes ${empRecords.length} attendance record(s) from Master Attendance`,
+    ];
+    if (targetMasterCfg) {
+      details.push(
+        `Removes ${emp.name}'s tab & rows from "${targetMasterCfg.spreadsheetTitle}"`
+      );
+    }
+    if (shouldSyncOtherMaster && otherMasterCfg) {
+      details.push(
+        `Removes ${emp.name}'s tab & rows from "${otherMasterCfg.spreadsheetTitle}"`
+      );
+    }
+    if (emp.individualSheetId) {
+      details.push(
+        `Moves "${emp.empCode} - ${emp.name} Attendance" Google Sheet to Drive Trash`
+      );
+    }
+
+    setConfirmRequest({
+      title: `Delete Employee ${emp.name}?`,
+      description: `Permanently delete ${emp.name} (${emp.empCode} · ${empCategory}) and their attendance records. If you want to keep their past attendance history, click Cancel and use Deactivate instead.`,
+      affectedTarget: `${emp.empCode} - ${emp.name}`,
+      details,
+      confirmLabel: 'Delete Employee',
+      destructive: true,
+      onConfirm: async () => {
+        setIsSyncing(true);
+        try {
+          await adminDeleteEmployee(emp, empRecords);
+          const nextEmployees = employees.filter((e) => e.id !== emp.id);
+          const nextRecords = records.filter((r) => !matchesEmployeeRecord(r));
+          setEmployees(nextEmployees);
+          setGateEmployees((prev) => prev.filter((e) => e.id !== emp.id));
+          setRecords(nextRecords);
+
+          let sheetsUpdated = false;
+          if (needsSheetSync) {
+            const activeToken = getAccessToken() || (await ensureGoogleToken());
+            if (activeToken) {
+              if (targetMasterCfg) {
+                const updatedCfg = await syncFullWorkbook(
+                  activeToken,
+                  targetMasterCfg.spreadsheetId,
+                  nextEmployees,
+                  nextRecords,
+                  empCategory,
+                  [empTabName]
+                );
+                await adminSaveSheetConfig(empCategory, updatedCfg);
+              }
+              if (shouldSyncOtherMaster && otherMasterCfg && otherCategory) {
+                const updatedOtherCfg = await syncFullWorkbook(
+                  activeToken,
+                  otherMasterCfg.spreadsheetId,
+                  nextEmployees,
+                  nextRecords,
+                  otherCategory,
+                  [empTabName]
+                );
+                await adminSaveSheetConfig(otherCategory, updatedOtherCfg);
+              }
+              if (emp.individualSheetId) {
+                await trashSpreadsheet(activeToken, emp.individualSheetId);
+              }
+              await refreshDriveFiles(activeToken);
+              sheetsUpdated = true;
+            }
+          }
+
+          setNotice({
+            type: needsSheetSync && !sheetsUpdated ? 'info' : 'success',
+            message:
+              needsSheetSync && !sheetsUpdated
+                ? `Deleted ${emp.name} (${emp.empCode}) and ${empRecords.length} record(s). Connect Google Sheets and click "Update All Sheets" to remove them from your Mega Sheet.`
+                : sheetsUpdated
+                ? `Deleted ${emp.name} (${emp.empCode}), ${empRecords.length} record(s), and updated connected Google Sheets.`
+                : `Deleted ${emp.name} (${emp.empCode}) and ${empRecords.length} attendance record(s).`,
+          });
+        } catch (err) {
+          handleGoogleError(err, `Could not delete ${emp.name}.`);
+        } finally {
+          setIsSyncing(false);
+        }
+      },
+    });
   };
 
   const handleLoadStarterRoster = async () => {
@@ -911,8 +1016,7 @@ export default function App() {
     }
   };
 
-  const handleRequestSyncAll = (categoryFilter: 'all' | CompanyCategory = 'all') => {
-    const token = getAccessToken();
+  const handleRequestSyncAll = async (categoryFilter: 'all' | CompanyCategory = 'all') => {
     const targetCategories =
       categoryFilter === 'all'
         ? COMPANY_CATEGORIES.filter((cat) => Boolean(sheetConfigs[cat]))
@@ -920,18 +1024,20 @@ export default function App() {
         ? [categoryFilter]
         : [];
 
-    if (!token || targetCategories.length === 0) {
+    if (targetCategories.length === 0) {
       setActiveNav('sheets-sync');
       setNotice({
         type: 'info',
-        message: !token
-          ? 'Sign in with Google Sheets to sync your Master Sheets.'
-          : categoryFilter === 'all'
-          ? 'Create or connect a Permanent or Temporary Master Sheet first.'
-          : `Create or connect a Master Sheet for ${categoryFilter} first.`,
+        message:
+          categoryFilter === 'all'
+            ? 'Create or connect a Permanent or Temporary Master Sheet first.'
+            : `Create or connect a Master Sheet for ${categoryFilter} first.`,
       });
       return;
     }
+
+    const token = await ensureGoogleToken();
+    if (!token) return;
 
     const titles = targetCategories
       .map((cat) => sheetConfigs[cat]?.spreadsheetTitle)
@@ -1911,9 +2017,17 @@ export default function App() {
           {isAdminUnlocked && activeNav === 'employees' && (
             <EmployeesView
               employees={employees}
+              hasConnectedSheets={Boolean(
+                sheetConfigs['Sukhsa Export Permanent'] ||
+                  sheetConfigs['Sukhsa Export Temporary'] ||
+                  employees.some((e) => Boolean(e.individualSheetId))
+              )}
+              isSyncing={isSyncing}
               onSaveEmployee={handleSaveEmployee}
               onToggleActive={handleToggleActive}
+              onDeleteEmployee={handleDeleteEmployee}
               onLoadStarterRoster={handleLoadStarterRoster}
+              onRequestUpdateAllSheets={handleRequestUpdateAllSheets}
             />
           )}
 
