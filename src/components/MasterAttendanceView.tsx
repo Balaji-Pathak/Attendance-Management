@@ -252,34 +252,39 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Summary Strip */}
-      <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+      <section className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-[repeat(3,minmax(0,1fr))_minmax(220px,1.45fr)_minmax(0,1fr)]">
+        <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
           <div className="text-xs font-medium text-slate-500">Present Days (P)</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
+          <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-slate-900 tabular-nums leading-tight">
             {totals.totalPresent}
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+        <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
           <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
+          <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-teal-800 tabular-nums leading-tight">
             {totals.totalNetDecimal.toFixed(2)}h
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+        <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
           <div className="text-xs font-medium text-slate-500">Normal Hours (H)</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
+          <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-amber-700 tabular-nums leading-tight">
             {totals.totalNormalDecimal.toFixed(2)}h
           </div>
         </div>
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-5 py-4">
-          <div className="text-xs font-medium text-emerald-800">Net Payable ((Working − Theka) × Rate)</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-emerald-900 tabular-nums">
+        <div className="min-w-0 overflow-hidden md:col-span-2 xl:col-span-1 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-3.5 sm:px-5 sm:py-4">
+          <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs font-medium text-emerald-800">
+            <span>Net Payable</span>
+            <span className="text-[11px] font-normal text-emerald-800/80 whitespace-nowrap">
+              ((Working − Theka) × Rate)
+            </span>
+          </div>
+          <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-emerald-900 tabular-nums leading-tight break-words">
             {formatCurrencyINR(totals.totalPayable)}
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+        <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
           <div className="text-xs font-medium text-slate-500">Pending Sheet Sync</div>
-          <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
+          <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-slate-900 tabular-nums leading-tight">
             {totals.pendingSync}
           </div>
         </div>

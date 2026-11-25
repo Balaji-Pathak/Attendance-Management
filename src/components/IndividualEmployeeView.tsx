@@ -1003,37 +1003,41 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-[repeat(4,minmax(0,1fr))_minmax(210px,1.45fr)]">
+            <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
               <div className="text-xs font-medium text-slate-500">Present (P)</div>
-              <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-900 tabular-nums">
+              <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-slate-900 tabular-nums leading-tight">
                 {overallSummary.presentCount}
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+            <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
               <div className="text-xs font-medium text-slate-500">Net Normal Hours (H)</div>
-              <div className="mt-1.5 font-mono text-2xl font-semibold text-amber-700 tabular-nums">
+              <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-amber-700 tabular-nums leading-tight">
                 {overallSummary.netNormalDecimal.toFixed(2)}h
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+            <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
               <div className="text-xs font-medium text-slate-500">Theka Deducted</div>
-              <div className="mt-1.5 font-mono text-2xl font-semibold text-slate-700 tabular-nums">
+              <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-slate-700 tabular-nums leading-tight">
                 {overallSummary.thekaDecimal.toFixed(2)}h
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
+            <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white px-4 py-3.5 sm:px-5 sm:py-4">
               <div className="text-xs font-medium text-slate-500">Total Working Hours</div>
-              <div className="mt-1.5 font-mono text-2xl font-semibold text-teal-800 tabular-nums">
+              <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-semibold text-teal-800 tabular-nums leading-tight">
                 {overallSummary.netDecimal.toFixed(2)}h
               </div>
             </div>
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-5 py-4">
-              <div className="text-xs font-medium text-emerald-900">
-                Net Payable
-                {selectedEmpRate > 0 ? ` (@ ${formatHourlyRateINR(selectedEmpRate)}/hr)` : ''}
+            <div className="min-w-0 overflow-hidden sm:col-span-2 md:col-span-2 xl:col-span-1 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3.5 sm:px-5 sm:py-4">
+              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs font-medium text-emerald-900">
+                <span>Net Payable</span>
+                {selectedEmpRate > 0 && (
+                  <span className="text-[11px] font-normal text-emerald-800/80 whitespace-nowrap">
+                    (@ {formatHourlyRateINR(selectedEmpRate)}/hr)
+                  </span>
+                )}
               </div>
-              <div className="mt-1.5 font-mono text-2xl font-bold text-emerald-800 tabular-nums">
+              <div className="mt-1.5 font-mono text-xl xl:text-[22px] 2xl:text-2xl font-bold text-emerald-800 tabular-nums leading-tight break-words">
                 {formatCurrencyINR(overallSummary.netPayable)}
               </div>
             </div>
@@ -1243,39 +1247,42 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
               <>
                 {/* Monthly Summary + Month-End Theka Deduction Control */}
                 <div className="border-b border-slate-200 bg-white px-6 py-4 grid grid-cols-1 gap-4 lg:grid-cols-12 items-center">
-                  <div className="lg:col-span-8 grid grid-cols-2 gap-2.5 sm:grid-cols-5 text-xs">
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="lg:col-span-8 grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-[repeat(4,minmax(0,1fr))_minmax(175px,1.45fr)] text-xs">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <div className="text-slate-500">Present (P)</div>
-                      <div className="mt-0.5 font-mono text-base font-semibold text-slate-900 tabular-nums">
+                      <div className="mt-0.5 font-mono text-sm sm:text-base font-semibold text-slate-900 tabular-nums leading-tight">
                         {historyTotals.presentCount}
                       </div>
                     </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <div className="text-slate-500">Total Working</div>
-                      <div className="mt-0.5 font-mono text-base font-semibold text-teal-800 tabular-nums">
+                      <div className="mt-0.5 font-mono text-sm sm:text-base font-semibold text-teal-800 tabular-nums leading-tight">
                         {historyTotals.netDecimal.toFixed(2)}h
                       </div>
                     </div>
-                    <div className="rounded-lg border border-red-200 bg-red-50/50 px-3 py-2">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-red-200 bg-red-50/50 px-3 py-2">
                       <div className="text-red-800">Theka Working</div>
-                      <div className="mt-0.5 font-mono text-base font-semibold text-red-700 tabular-nums">
+                      <div className="mt-0.5 font-mono text-sm sm:text-base font-semibold text-red-700 tabular-nums leading-tight">
                         -{historyTotals.monthlyThekaDecimal.toFixed(2)}h
                       </div>
                     </div>
-                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
                       <div className="text-amber-900 font-semibold">Net Normal (H)</div>
-                      <div className="mt-0.5 font-mono text-base font-bold text-amber-800 tabular-nums">
+                      <div className="mt-0.5 font-mono text-sm sm:text-base font-bold text-amber-800 tabular-nums leading-tight">
                         {historyTotals.finalNetNormalDecimal.toFixed(2)}h
                       </div>
                     </div>
-                    <div className="col-span-2 sm:col-span-1 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2">
-                      <div className="text-emerald-900 font-semibold">
-                        Net Payable
-                        {historyTotals.hourlyRate > 0
-                          ? ` (${historyTotals.payableDecimal.toFixed(2)}h × ${formatHourlyRateINR(historyTotals.hourlyRate)})`
-                          : ''}
+                    <div className="col-span-2 sm:col-span-2 xl:col-span-1 min-w-0 overflow-hidden rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2">
+                      <div className="flex flex-wrap items-baseline gap-x-1 text-emerald-900 font-semibold leading-snug">
+                        <span>Net Payable</span>
+                        {historyTotals.hourlyRate > 0 && (
+                          <span className="text-[10px] font-medium text-emerald-800/80 whitespace-nowrap">
+                            ({historyTotals.payableDecimal.toFixed(2)}h ×{' '}
+                            {formatHourlyRateINR(historyTotals.hourlyRate)})
+                          </span>
+                        )}
                       </div>
-                      <div className="mt-0.5 font-mono text-base font-bold text-emerald-800 tabular-nums">
+                      <div className="mt-0.5 font-mono text-sm sm:text-base font-bold text-emerald-800 tabular-nums leading-tight break-words">
                         {formatCurrencyINR(historyTotals.netPayable)}
                       </div>
                     </div>
