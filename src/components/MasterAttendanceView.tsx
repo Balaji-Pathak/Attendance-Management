@@ -1,6 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Edit3, RefreshCw, Search, Trash2, X } from 'lucide-react';
-import { AttendanceRecord, Employee, SheetConfig } from '../types/attendance';
+import {
+  AttendanceRecord,
+  COMPANY_CATEGORIES,
+  CompanyCategory,
+  DEFAULT_COMPANY_CATEGORY,
+  Employee,
+  SheetConfig,
+} from '../types/attendance';
 import {
   calculateShiftMetrics,
   downloadCSV,
@@ -11,6 +18,7 @@ import {
   getCurrentYearMonth,
   getDayNameShort,
   getRecordPayroll,
+  normalizeCompanyCategory,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -35,10 +43,28 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
   const [search, setSearch] = useState('');
   const [monthFilter, setMonthFilter] = useState<string>(() => getCurrentYearMonth());
   const [dateFilter, setDateFilter] = useState('');
+  const [companyFilter, setCompanyFilter] = useState<'all' | CompanyCategory>('all');
   const [empFilter, setEmpFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [editing, setEditing] = useState<AttendanceRecord | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  const empCategoryMap = useMemo(() => {
+    const map = new Map<string, CompanyCategory>();
+    for (const emp of employees) {
+      const cat = normalizeCompanyCategory(emp.companyCategory);
+      map.set(emp.id, cat);
+      map.set(emp.empCode, cat);
+    }
+    return map;
+  }, [employees]);
+
+  const filterEmployeeOptions = useMemo(() => {
+    if (companyFilter === 'all') return employees;
+    return employees.filter(
+      (e) => normalizeCompanyCategory(e.companyCategory) === companyFilter
+    );
+  }, [employees, companyFilter]);
 
   const filteredRecords = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,19 +75,34 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         } else if (monthFilter) {
           if (!r.date.startsWith(monthFilter)) return false;
         }
+        const cat =
+          empCategoryMap.get(r.empId) ??
+          empCategoryMap.get(r.empCode) ??
+          DEFAULT_COMPANY_CATEGORY;
+        if (companyFilter !== 'all' && cat !== companyFilter) return false;
         if (empFilter !== 'all' && r.empId !== empFilter) return false;
         if (statusFilter !== 'all' && r.status !== statusFilter) return false;
         if (!q) return true;
         return (
           r.empCode.toLowerCase().includes(q) ||
-          r.empName.toLowerCase().includes(q)
+          r.empName.toLowerCase().includes(q) ||
+          cat.toLowerCase().includes(q)
         );
       })
       .sort((a, b) => {
         if (a.date !== b.date) return b.date.localeCompare(a.date);
         return b.inTime.localeCompare(a.inTime);
       });
-  }, [records, monthFilter, dateFilter, empFilter, statusFilter, search]);
+  }, [
+    records,
+    monthFilter,
+    dateFilter,
+    companyFilter,
+    empFilter,
+    statusFilter,
+    search,
+    empCategoryMap,
+  ]);
 
   const totals = useMemo(() => {
     let totalPresent = 0;
@@ -102,6 +143,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
         'Day',
         'Employee ID',
         'Name',
+        'Company Category',
         'In Time',
         'Out Time',
         'Away (mins)',
@@ -113,11 +155,16 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
       filteredRecords.map((r) => {
         const p = getRecordPayroll(r);
         const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+        const companyCategory =
+          empCategoryMap.get(r.empId) ??
+          empCategoryMap.get(r.empCode) ??
+          DEFAULT_COMPANY_CATEGORY;
         return [
           r.date,
           getDayNameShort(r.date),
           r.empCode,
           r.empName,
+          companyCategory,
           formatDisplayTime(r.inTime),
           r.outTime ? formatDisplayTime(r.outTime) : '',
           Math.round((r.pausedTotalSeconds ?? 0) / 60),
@@ -264,13 +311,30 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
             </div>
 
             <select
+              value={companyFilter}
+              onChange={(e) => {
+                setCompanyFilter(e.target.value as 'all' | CompanyCategory);
+                setEmpFilter('all');
+              }}
+              aria-label="Filter by company category"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-teal-700 focus:outline-none"
+            >
+              <option value="all">All Companies</option>
+              {COMPANY_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+
+            <select
               value={empFilter}
               onChange={(e) => setEmpFilter(e.target.value)}
               aria-label="Filter by employee"
               className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-teal-700 focus:outline-none"
             >
               <option value="all">All Employees</option>
-              {employees.map((e) => (
+              {filterEmployeeOptions.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.empCode} · {e.name}
                 </option>
@@ -336,6 +400,7 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   <th className="px-6 py-3 whitespace-nowrap">Date</th>
                   <th className="px-4 py-3 whitespace-nowrap">Employee ID</th>
                   <th className="px-4 py-3 whitespace-nowrap">Name</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Company</th>
                   <th className="px-4 py-3 whitespace-nowrap">In Time</th>
                   <th className="px-4 py-3 whitespace-nowrap">Out Time</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Away</th>
@@ -352,6 +417,10 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                   const awayMins = Math.round((rec.pausedTotalSeconds ?? 0) / 60);
                   const hasOut = Boolean(rec.outTime && rec.netMinutes !== null);
                   const dayNormalHrs = Number((p.grossNormalMinutes / 60).toFixed(2));
+                  const companyCategory =
+                    empCategoryMap.get(rec.empId) ??
+                    empCategoryMap.get(rec.empCode) ??
+                    DEFAULT_COMPANY_CATEGORY;
 
                   return (
                     <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
@@ -370,6 +439,17 @@ export const MasterAttendanceView: React.FC<MasterAttendanceViewProps> = ({
                       </td>
                       <td className="px-4 py-3.5 font-medium text-slate-900 whitespace-nowrap">
                         {rec.empName}
+                      </td>
+                      <td className="px-4 py-3.5 text-xs text-slate-600 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                            companyCategory === 'Sukhsa Export Permanent'
+                              ? 'bg-teal-50 text-teal-800'
+                              : 'bg-amber-50 text-amber-800'
+                          }`}
+                        >
+                          {companyCategory}
+                        </span>
                       </td>
                       <td className="px-4 py-3.5 font-mono text-xs text-slate-900 tabular-nums whitespace-nowrap">
                         {formatDisplayTime(rec.inTime)}

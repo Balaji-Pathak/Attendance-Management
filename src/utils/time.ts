@@ -1,4 +1,20 @@
-import { AttendanceRecord, AttendanceStatus, Employee } from '../types/attendance';
+import {
+  AttendanceRecord,
+  AttendanceStatus,
+  CompanyCategory,
+  DEFAULT_COMPANY_CATEGORY,
+  Employee,
+} from '../types/attendance';
+
+export function normalizeCompanyCategory(raw?: unknown): CompanyCategory {
+  if (typeof raw === 'string') {
+    const cleaned = raw.trim().toLowerCase();
+    if (cleaned.includes('temporary') || cleaned === 'temp') {
+      return 'Sukhsa Export Temporary';
+    }
+  }
+  return DEFAULT_COMPANY_CATEGORY;
+}
 
 export function getBrowserTimeZone(): string {
   try {
@@ -398,11 +414,11 @@ export function downloadCSV(filename: string, headers: string[], rows: (string |
 
 export function buildStarterEmployees(): Employee[] {
   return [
-    { id: 'emp-101', empCode: 'EMP-001', name: 'Rajesh Kumar', department: 'Production', breakMinutes: 30, active: true },
-    { id: 'emp-102', empCode: 'EMP-002', name: 'Anita Sharma', department: 'Quality', breakMinutes: 30, active: true },
-    { id: 'emp-103', empCode: 'EMP-003', name: 'Vikram Patel', department: 'Dispatch', breakMinutes: 30, active: true },
-    { id: 'emp-104', empCode: 'EMP-004', name: 'Meena Verma', department: 'Packaging', breakMinutes: 30, active: true },
-    { id: 'emp-105', empCode: 'EMP-005', name: 'Suresh Nair', department: 'Maintenance', breakMinutes: 30, active: true },
+    { id: 'emp-101', empCode: 'EMP-001', name: 'Rajesh Kumar', department: 'Production', companyCategory: DEFAULT_COMPANY_CATEGORY, breakMinutes: 30, active: true },
+    { id: 'emp-102', empCode: 'EMP-002', name: 'Anita Sharma', department: 'Quality', companyCategory: DEFAULT_COMPANY_CATEGORY, breakMinutes: 30, active: true },
+    { id: 'emp-103', empCode: 'EMP-003', name: 'Vikram Patel', department: 'Dispatch', companyCategory: DEFAULT_COMPANY_CATEGORY, breakMinutes: 30, active: true },
+    { id: 'emp-104', empCode: 'EMP-004', name: 'Meena Verma', department: 'Packaging', companyCategory: DEFAULT_COMPANY_CATEGORY, breakMinutes: 30, active: true },
+    { id: 'emp-105', empCode: 'EMP-005', name: 'Suresh Nair', department: 'Maintenance', companyCategory: DEFAULT_COMPANY_CATEGORY, breakMinutes: 30, active: true },
   ];
 }
 

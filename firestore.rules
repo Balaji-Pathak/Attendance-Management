@@ -46,6 +46,7 @@ service cloud.firestore {
           'empCode',
           'name',
           'department',
+          'companyCategory',
           'breakMinutes',
           'active',
           'individualSheetId',
@@ -56,6 +57,7 @@ service cloud.firestore {
         && data.empCode is string && data.empCode.size() >= 1 && data.empCode.size() <= 30
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
         && data.department is string && data.department.size() >= 1 && data.department.size() <= 60
+        && (!('companyCategory' in data) || data.companyCategory in ['Sukhsa Export Permanent', 'Sukhsa Export Temporary'])
         && data.breakMinutes is int && data.breakMinutes >= 0 && data.breakMinutes <= 180
         && data.active is bool
         && (!('individualSheetId' in data) || (data.individualSheetId is string && data.individualSheetId.size() <= 128))

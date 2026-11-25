@@ -7,6 +7,7 @@ import {
   getEmployeeSheetTabName,
   getRecordPayroll,
   isSundayISO,
+  normalizeCompanyCategory,
   parseDisplayTimeToHHMM,
 } from '../utils/time';
 
@@ -21,6 +22,7 @@ const MASTER_HEADERS = [
   'Day',
   'Employee ID',
   'Name',
+  'Company Category',
   'In Time',
   'Out Time',
   'Away (mins)',
@@ -33,6 +35,7 @@ const MASTER_HEADERS = [
 const EMPLOYEES_HEADERS = [
   'Employee ID',
   'Name',
+  'Company Category',
   'Department',
   'Status',
   'Individual Sheet Link',
@@ -123,7 +126,18 @@ export async function getSpreadsheetMetadata(
   );
 }
 
-function buildMasterRows(records: AttendanceRecord[]): (string | number)[][] {
+function buildMasterRows(
+  records: AttendanceRecord[],
+  employees: Employee[] = []
+): (string | number)[][] {
+  const categoryByEmpId = new Map<string, string>();
+  const categoryByEmpCode = new Map<string, string>();
+  for (const emp of employees) {
+    const cat = normalizeCompanyCategory(emp.companyCategory);
+    categoryByEmpId.set(emp.id, cat);
+    categoryByEmpCode.set(emp.empCode, cat);
+  }
+
   const sorted = [...records].sort((a, b) => {
     if (a.date !== b.date) return b.date.localeCompare(a.date);
     return b.inTime.localeCompare(a.inTime);
@@ -134,11 +148,16 @@ function buildMasterRows(records: AttendanceRecord[]): (string | number)[][] {
     ...sorted.map((r) => {
       const p = getRecordPayroll(r);
       const hasOut = Boolean(r.outTime && r.netMinutes !== null);
+      const companyCat =
+        categoryByEmpId.get(r.empId) ??
+        categoryByEmpCode.get(r.empCode) ??
+        normalizeCompanyCategory(undefined);
       return [
         r.date,
         getDayNameShort(r.date),
         r.empCode,
         r.empName,
+        companyCat,
         formatDisplayTime(r.inTime),
         r.outTime ? formatDisplayTime(r.outTime) : '',
         Math.round((r.pausedTotalSeconds ?? 0) / 60),
@@ -157,6 +176,7 @@ function buildEmployeesRows(employees: Employee[]): (string | number)[][] {
     ...employees.map((e) => [
       e.empCode,
       e.name,
+      normalizeCompanyCategory(e.companyCategory),
       e.department,
       e.active ? 'Active' : 'Inactive',
       e.individualSheetUrl ?? '',
@@ -197,14 +217,14 @@ function buildIndividualEmployeeRows(
   const periodLabel = monthFilter ? formatMonthLabel(monthFilter) : 'All Months';
 
   const bannerRow1: (string | number)[] = [
+    'Company',
+    normalizeCompanyCategory(employee.companyCategory),
     'Employee',
     `${employee.empCode} - ${employee.name}`,
     'Period',
     periodLabel,
     'Shift Rule',
-    '8h = 1 P | <8h & OT = H',
-    'Sunday Rule',
-    '100% OT -> H',
+    '8h=1 P | <8h/OT/Sun=H',
     '',
   ];
 
@@ -295,7 +315,7 @@ async function formatSheetHeaders(
     const isIndividual = s.title !== MASTER_TAB_NAME && s.title !== EMPLOYEES_TAB_NAME;
     const headerRowIndex = isIndividual ? 3 : 0;
     const freezeCount = isIndividual ? 4 : 1;
-    const colCount = isIndividual ? 9 : s.title === MASTER_TAB_NAME ? 11 : 5;
+    const colCount = isIndividual ? 9 : s.title === MASTER_TAB_NAME ? 12 : 6;
 
     requests.push({
       updateSheetProperties: {
@@ -536,7 +556,7 @@ export async function createMasterSpreadsheet(
   const valueRanges = [
     {
       range: `'${MASTER_TAB_NAME}'!A1`,
-      values: buildMasterRows(records),
+      values: buildMasterRows(records, employees),
     },
     {
       range: `'${EMPLOYEES_TAB_NAME}'!A1`,
@@ -627,13 +647,13 @@ export async function syncFullWorkbook(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: requiredTabs.map((t) => `'${t}'!A1:L5000`),
+        ranges: requiredTabs.map((t) => `'${t}'!A1:M5000`),
       }),
     }
   );
 
   const valueRanges = [
-    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records) },
+    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records, employees) },
     { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(employees) },
     ...employees.map((e) => ({
       range: `'${getEmployeeSheetTabName(e.empCode, e.name)}'!A1`,
@@ -718,7 +738,7 @@ export async function syncEmployeeAndMasterTabs(
     {
       method: 'POST',
       body: JSON.stringify({
-        ranges: neededTabs.map((t) => `'${t}'!A1:L5000`),
+        ranges: neededTabs.map((t) => `'${t}'!A1:M5000`),
       }),
     }
   );
@@ -731,7 +751,7 @@ export async function syncEmployeeAndMasterTabs(
       body: JSON.stringify({
         valueInputOption: 'USER_ENTERED',
         data: [
-          { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records) },
+          { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(records, employees) },
           { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(employees) },
           { range: `'${empTab}'!A1`, values: buildIndividualEmployeeRows(employee, records) },
         ],
@@ -1139,10 +1159,10 @@ export async function loadWorkbookData(
 
   const rangesToFetch: string[] = [];
   if (tabNames.includes(EMPLOYEES_TAB_NAME)) {
-    rangesToFetch.push(`'${EMPLOYEES_TAB_NAME}'!A2:E2000`);
+    rangesToFetch.push(`'${EMPLOYEES_TAB_NAME}'!A1:F2000`);
   }
   if (tabNames.includes(MASTER_TAB_NAME)) {
-    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:L5000`);
+    rangesToFetch.push(`'${MASTER_TAB_NAME}'!A1:M5000`);
   }
 
   const employees: Employee[] = [];
@@ -1157,17 +1177,29 @@ export async function loadWorkbookData(
     for (const vr of batch.valueRanges ?? []) {
       const rows = vr.values ?? [];
       if (vr.range.includes(EMPLOYEES_TAB_NAME)) {
-        for (const row of rows) {
+        const empHeader = (rows[0] ?? []).map((c) => String(c || '').trim().toLowerCase());
+        const hasHeader = empHeader.some((c) => c.includes('employee id') || c === 'name');
+        const hasCompanyCol = empHeader.some((c) => c.includes('company'));
+        const dataRows = hasHeader ? rows.slice(1) : rows;
+        for (const row of dataRows) {
           if (!row[0] && !row[1]) continue;
           const empCode = String(row[0] || '').trim();
-          const sheetUrl = row[4] ? String(row[4]).trim() : undefined;
+          const name = String(row[1] || '').trim();
+          const companyCategory = hasCompanyCol
+            ? normalizeCompanyCategory(row[2])
+            : normalizeCompanyCategory(undefined);
+          const department = String((hasCompanyCol ? row[3] : row[2]) || 'General').trim();
+          const activeRaw = String((hasCompanyCol ? row[4] : row[3]) || 'Active').toLowerCase();
+          const sheetUrlRaw = hasCompanyCol ? row[5] : row[4];
+          const sheetUrl = sheetUrlRaw ? String(sheetUrlRaw).trim() : undefined;
           employees.push({
             id: `emp-${empCode.toLowerCase().replace(/[^a-z0-9_-]/g, '') || Date.now()}`,
             empCode,
-            name: String(row[1] || '').trim(),
-            department: String(row[2] || 'General').trim(),
+            name,
+            department,
+            companyCategory,
             breakMinutes: 30,
-            active: String(row[3] || 'Active').toLowerCase() !== 'inactive',
+            active: activeRaw !== 'inactive',
             individualSheetId: sheetUrl ? extractSpreadsheetId(sheetUrl) : undefined,
             individualSheetUrl: sheetUrl,
           });
@@ -1175,7 +1207,16 @@ export async function loadWorkbookData(
       } else if (vr.range.includes(MASTER_TAB_NAME)) {
         const header = (rows[0] ?? []).map((c) => String(c || '').trim().toLowerCase());
         const hasDayCol = header.includes('day');
+        const hasCompanyCol = header.some((c) => c.includes('company'));
+        const inIdx = header.findIndex((c) => c === 'in time' || c === 'in');
+        const outIdx = header.findIndex((c) => c === 'out time' || c === 'out');
+        const awayIdx = header.findIndex((c) => c.includes('away'));
         const thikadaCol = header.findIndex((c) => c.includes('thikada'));
+
+        const defaultInIdx = hasCompanyCol ? 5 : hasDayCol ? 4 : 3;
+        const defaultOutIdx = hasCompanyCol ? 6 : hasDayCol ? 5 : 4;
+        const defaultAwayIdx = hasCompanyCol ? 7 : hasDayCol ? 6 : -1;
+
         for (const row of rows.slice(1)) {
           const date = normalizeDateToISO(row[0]);
           const empCode = String((hasDayCol ? row[2] : row[1]) || '').trim();
@@ -1183,10 +1224,13 @@ export async function loadWorkbookData(
           if (!date || !empCode) continue;
 
           const inTime =
-            parseDisplayTimeToHHMM(hasDayCol ? row[4] : row[3]) || '09:00';
-          const outTime = parseDisplayTimeToHHMM(hasDayCol ? row[5] : row[4]);
+            parseDisplayTimeToHHMM(row[inIdx !== -1 ? inIdx : defaultInIdx]) || '09:00';
+          const outTime = parseDisplayTimeToHHMM(row[outIdx !== -1 ? outIdx : defaultOutIdx]);
+          const awayColIndex = awayIdx !== -1 ? awayIdx : defaultAwayIdx;
           const awayMins =
-            hasDayCol && !Number.isNaN(Number(row[6])) ? Math.max(0, Number(row[6])) : 0;
+            awayColIndex !== -1 && !Number.isNaN(Number(row[awayColIndex]))
+              ? Math.max(0, Number(row[awayColIndex]))
+              : 0;
           const thikadaHrs =
             thikadaCol !== -1 && !Number.isNaN(Number(row[thikadaCol]))
               ? Math.max(0, Number(row[thikadaCol]))

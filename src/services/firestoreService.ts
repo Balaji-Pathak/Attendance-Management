@@ -24,6 +24,7 @@ import {
   getCurrentHHMM,
   getTodayISO,
   isSundayISO,
+  normalizeCompanyCategory,
   sortRecordsNewestFirst,
 } from '../utils/time';
 import { db, handleFirestoreError, OperationType } from './firebaseClient';
@@ -53,6 +54,7 @@ function sanitizeEmployeePayload(emp: Employee): Record<string, unknown> {
     empCode: emp.empCode.trim().slice(0, 30),
     name: emp.name.trim().slice(0, 80),
     department: (emp.department || 'General').trim().slice(0, 60),
+    companyCategory: normalizeCompanyCategory(emp.companyCategory),
     breakMinutes: Math.max(0, Math.min(180, Math.round(emp.breakMinutes || 30))),
     active: Boolean(emp.active),
   };
@@ -183,6 +185,7 @@ export function subscribeActiveEmployees(
             empCode: String(data.empCode ?? ''),
             name: String(data.name ?? ''),
             department: String(data.department ?? 'General'),
+            companyCategory: normalizeCompanyCategory(data.companyCategory),
           };
         })
         .sort((a, b) => a.empCode.localeCompare(b.empCode));
@@ -443,12 +446,13 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
 // ADMIN SUBSCRIPTIONS & MUTATIONS (Requires verified Admin Google Sign-In)
 // ============================================================================
 export function subscribeAllEmployees(
-  onData: (employees: Employee[]) => void,
+  onData: (employees: Employee[], missingCategoryEmployees: Employee[]) => void,
   onError: (err: Error) => void
 ): () => void {
   return onSnapshot(
     collection(db, EMPLOYEES_COL),
     (snapshot) => {
+      const missingCategoryEmployees: Employee[] = [];
       const list: Employee[] = snapshot.docs
         .map((d) => {
           const data = d.data();
@@ -461,11 +465,13 @@ export function subscribeAllEmployees(
                   )
                 ) as Record<string, number>
               : undefined;
-          return {
+          const normalizedCategory = normalizeCompanyCategory(data.companyCategory);
+          const emp: Employee = {
             id: String(data.id ?? d.id),
             empCode: String(data.empCode ?? ''),
             name: String(data.name ?? ''),
             department: String(data.department ?? 'General'),
+            companyCategory: normalizedCategory,
             breakMinutes: typeof data.breakMinutes === 'number' ? data.breakMinutes : 30,
             active: data.active !== false,
             individualSheetId: data.individualSheetId
@@ -476,9 +482,13 @@ export function subscribeAllEmployees(
               : undefined,
             monthlyThikadaMinutes,
           };
+          if (typeof data.companyCategory !== 'string' || !data.companyCategory.trim()) {
+            missingCategoryEmployees.push(emp);
+          }
+          return emp;
         })
         .sort((a, b) => a.empCode.localeCompare(b.empCode));
-      onData(list);
+      onData(list, missingCategoryEmployees);
     },
     (error) => {
       try {
@@ -550,6 +560,33 @@ export async function adminSaveEmployee(emp: Employee): Promise<void> {
     await setDoc(doc(db, EMPLOYEES_COL, safeId), sanitizeEmployeePayload({ ...emp, id: safeId }));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminBackfillEmployeeCompanyCategories(
+  employeesMissingCategory: Employee[]
+): Promise<void> {
+  if (employeesMissingCategory.length === 0) return;
+  for (let i = 0; i < employeesMissingCategory.length; i += 450) {
+    const chunk = employeesMissingCategory.slice(i, i + 450);
+    const batch = writeBatch(db);
+    for (const emp of chunk) {
+      const safeId = emp.id.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+      if (!safeId) continue;
+      batch.set(
+        doc(db, EMPLOYEES_COL, safeId),
+        sanitizeEmployeePayload({
+          ...emp,
+          id: safeId,
+          companyCategory: normalizeCompanyCategory(emp.companyCategory),
+        })
+      );
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, EMPLOYEES_COL);
+    }
   }
 }
 

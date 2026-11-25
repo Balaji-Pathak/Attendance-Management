@@ -10,7 +10,12 @@ import {
   Timer,
   X,
 } from 'lucide-react';
-import { AttendanceRecord, GateEmployeeView } from '../types/attendance';
+import {
+  AttendanceRecord,
+  COMPANY_CATEGORIES,
+  CompanyCategory,
+  GateEmployeeView,
+} from '../types/attendance';
 import {
   calculateMetricsFromWorkedMinutes,
   computeLiveElapsedSeconds,
@@ -20,6 +25,7 @@ import {
   formatHMS,
   getCurrentHHMM,
   isSundayISO,
+  normalizeCompanyCategory,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -54,6 +60,7 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<GateFilter>('all');
+  const [companyFilter, setCompanyFilter] = useState<'all' | CompanyCategory>('all');
   const [nowTime, setNowTime] = useState<Date>(() => new Date());
   const [pendingAction, setPendingAction] = useState<PendingGateAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -103,14 +110,17 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
         : 'completed';
 
       if (filter !== 'all' && state !== filter) return false;
+      const category = normalizeCompanyCategory(emp.companyCategory);
+      if (companyFilter !== 'all' && category !== companyFilter) return false;
       if (!q) return true;
       return (
         emp.empCode.toLowerCase().includes(q) ||
         emp.name.toLowerCase().includes(q) ||
-        emp.department.toLowerCase().includes(q)
+        emp.department.toLowerCase().includes(q) ||
+        category.toLowerCase().includes(q)
       );
     });
-  }, [employees, recordByEmp, filter, searchQuery]);
+  }, [employees, recordByEmp, filter, companyFilter, searchQuery]);
 
   const nowMs = nowTime.getTime();
   const liveNowHHMM = useMemo(() => getCurrentHHMM(), [nowTime]);
@@ -238,28 +248,44 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
             />
           </div>
 
-          <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1">
-            {(
-              [
-                { id: 'all', label: `All (${stats.total})` },
-                { id: 'not_in', label: `Not In (${stats.notIn})` },
-                { id: 'on_duty', label: `On Duty (${stats.onDuty})` },
-                { id: 'completed', label: `Done (${stats.completed})` },
-              ] as const
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setFilter(tab.id)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  filter === tab.id
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2.5">
+            <select
+              value={companyFilter}
+              onChange={(e) => setCompanyFilter(e.target.value as 'all' | CompanyCategory)}
+              aria-label="Filter by company category"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 focus:border-teal-700 focus:outline-none"
+            >
+              <option value="all">All Companies</option>
+              {COMPANY_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1">
+              {(
+                [
+                  { id: 'all', label: `All (${stats.total})` },
+                  { id: 'not_in', label: `Not In (${stats.notIn})` },
+                  { id: 'on_duty', label: `On Duty (${stats.onDuty})` },
+                  { id: 'completed', label: `Done (${stats.completed})` },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setFilter(tab.id)}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    filter === tab.id
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -312,6 +338,9 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
                       </span>
                       <span className="text-xs text-slate-500">
                         · {emp.department}
+                      </span>
+                      <span className="text-xs font-medium text-teal-800">
+                        · {normalizeCompanyCategory(emp.companyCategory)}
                       </span>
                     </div>
 

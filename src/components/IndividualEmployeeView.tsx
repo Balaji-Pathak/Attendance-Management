@@ -12,7 +12,13 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { AttendanceRecord, Employee, SheetConfig } from '../types/attendance';
+import {
+  AttendanceRecord,
+  COMPANY_CATEGORIES,
+  CompanyCategory,
+  Employee,
+  SheetConfig,
+} from '../types/attendance';
 import {
   calculateShiftMetrics,
   downloadCSV,
@@ -23,6 +29,7 @@ import {
   getEmployeeSheetTabName,
   getMonthDays,
   getRecordPayroll,
+  normalizeCompanyCategory,
 } from '../utils/time';
 import { StatusLabel } from './StatusLabel';
 
@@ -79,7 +86,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   onSaveMonthlyThikada,
 }) => {
   const currentYearMonth = getCurrentYearMonth();
-  const [selectedEmpId, setSelectedEmpId] = useState<string>(employees[0]?.id ?? '');
+  const [selectedCategory, setSelectedCategory] = useState<CompanyCategory | null>(null);
+  const [selectedEmpId, setSelectedEmpId] = useState<string>('');
   const [overviewMonth, setOverviewMonth] = useState<string>(() => getCurrentYearMonth());
 
   // Import existing Google Sheet UI state
@@ -107,9 +115,43 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   const [syncBuilderToSheet, setSyncBuilderToSheet] = useState(true);
   const [isSavingMonth, setIsSavingMonth] = useState(false);
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<CompanyCategory, number> = {
+      'Sukhsa Export Permanent': 0,
+      'Sukhsa Export Temporary': 0,
+    };
+    for (const emp of employees) {
+      counts[normalizeCompanyCategory(emp.companyCategory)] += 1;
+    }
+    return counts;
+  }, [employees]);
+
+  const categoryEmployees = useMemo(() => {
+    if (!selectedCategory) return [];
+    return employees.filter(
+      (emp) => normalizeCompanyCategory(emp.companyCategory) === selectedCategory
+    );
+  }, [employees, selectedCategory]);
+
+  useEffect(() => {
+    if (!selectedCategory) {
+      if (selectedEmpId) setSelectedEmpId('');
+      return;
+    }
+    const existsInCategory = categoryEmployees.some((e) => e.id === selectedEmpId);
+    if (!existsInCategory) {
+      setSelectedEmpId(categoryEmployees[0]?.id ?? '');
+    }
+  }, [selectedCategory, categoryEmployees, selectedEmpId]);
+
   const selectedEmployee = useMemo(() => {
-    return employees.find((e) => e.id === selectedEmpId) ?? employees[0] ?? null;
-  }, [employees, selectedEmpId]);
+    if (!selectedCategory) return null;
+    return (
+      categoryEmployees.find((e) => e.id === selectedEmpId) ??
+      categoryEmployees[0] ??
+      null
+    );
+  }, [selectedCategory, categoryEmployees, selectedEmpId]);
 
   const allEmployeeRecords = useMemo(() => {
     if (!selectedEmployee) return [];
@@ -538,7 +580,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     );
   };
 
-  if (employees.length === 0 || !selectedEmployee) {
+  if (employees.length === 0) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white px-6 py-14 text-center">
         <p className="text-base font-semibold text-slate-900">No employees available</p>
@@ -549,20 +591,119 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     );
   }
 
-  const tabName = getEmployeeSheetTabName(selectedEmployee.empCode, selectedEmployee.name);
+  if (!selectedCategory) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8">
+        <div className="max-w-2xl">
+          <h2 className="text-lg font-semibold text-slate-900">Select Company List Category</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Choose a company category below to view its employees and manage individual attendance
+            sheets.
+          </p>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {COMPANY_CATEGORIES.map((category) => {
+            const count = categoryCounts[category];
+            const isPermanent = category === 'Sukhsa Export Permanent';
+            return (
+              <button
+                key={category}
+                type="button"
+                onClick={() => setSelectedCategory(category)}
+                className="group rounded-xl border border-slate-200 bg-slate-50/70 p-6 text-left transition-all hover:border-slate-900 hover:bg-white hover:shadow-sm"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span
+                    className={`inline-flex items-center rounded-md px-2.5 py-1 text-[11px] font-semibold ${
+                      isPermanent
+                        ? 'bg-teal-50 text-teal-800 border border-teal-200'
+                        : 'bg-amber-50 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    {isPermanent ? 'Permanent Staff' : 'Temporary Staff'}
+                  </span>
+                  <span className="font-mono text-sm font-semibold text-slate-700 tabular-nums">
+                    {count} {count === 1 ? 'employee' : 'employees'}
+                  </span>
+                </div>
+                <div className="mt-4 text-base font-bold text-slate-900 group-hover:text-teal-800">
+                  {category}
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Click to view employees and individual Google Sheets in {category}.
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const tabName = selectedEmployee
+    ? getEmployeeSheetTabName(selectedEmployee.empCode, selectedEmployee.name)
+    : '';
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
+    <div className="space-y-5">
+      {/* Two-Tab Company Category Filter Bar */}
+      <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-xs font-medium text-slate-500">Company List Category</div>
+          <div className="mt-0.5 text-sm font-semibold text-slate-900">{selectedCategory}</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {COMPANY_CATEGORIES.map((category) => {
+            const active = selectedCategory === category;
+            const count = categoryCounts[category];
+            return (
+              <button
+                key={category}
+                type="button"
+                onClick={() => setSelectedCategory(category)}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap ${
+                  active
+                    ? 'bg-slate-900 text-white'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <span>{category}</span>
+                <span
+                  className={`font-mono tabular-nums ${
+                    active ? 'text-teal-300' : 'text-slate-400'
+                  }`}
+                >
+                  ({count})
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {!selectedEmployee ? (
+        <div className="rounded-xl border border-slate-200 bg-white px-6 py-14 text-center">
+          <p className="text-base font-semibold text-slate-900">
+            No employees in {selectedCategory}
+          </p>
+          <p className="mt-1 text-sm text-slate-500">
+            Add an employee under {selectedCategory} in the Employees tab or select the other
+            company category above.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
       <aside className="lg:col-span-4 xl:col-span-3 rounded-xl border border-slate-200 bg-white overflow-hidden">
         <div className="border-b border-slate-200 px-5 py-4">
-          <h2 className="text-sm font-semibold text-slate-900">Select Employee Sheet</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{selectedCategory}</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            {employees.length} employee{employees.length === 1 ? '' : 's'} ·{' '}
+            {categoryEmployees.length} employee{categoryEmployees.length === 1 ? '' : 's'} ·{' '}
             {overviewMonth ? formatMonthLabel(overviewMonth) : 'All Months'}
           </p>
         </div>
         <div className="divide-y divide-slate-100 max-h-[540px] overflow-y-auto">
-          {employees.map((emp) => {
+          {categoryEmployees.map((emp) => {
             const isSelected = emp.id === selectedEmployee.id;
             const count = records.filter(
               (r) =>
@@ -608,11 +749,15 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
         <section className="rounded-xl border border-slate-200 bg-white p-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div>
-              <div className="flex items-center gap-2 text-xs text-slate-500">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                 <UserCheck className="h-3.5 w-3.5 text-teal-700" />
                 <span>{selectedEmployee.empCode}</span>
                 <span aria-hidden="true">·</span>
                 <span>{selectedEmployee.department}</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-medium text-teal-800">
+                  {normalizeCompanyCategory(selectedEmployee.companyCategory)}
+                </span>
               </div>
               <h2 className="mt-1 text-xl font-bold text-slate-900">
                 {selectedEmployee.name}
@@ -929,9 +1074,11 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           )}
         </section>
       </div>
+        </div>
+      )}
 
       {/* History Attendance Modal */}
-      {showHistoryModal && (
+      {showHistoryModal && selectedEmployee && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
           role="dialog"
@@ -1391,7 +1538,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
       )}
 
       {/* Previous Month Bulk Builder Modal */}
-      {showMonthBuilder && (
+      {showMonthBuilder && selectedEmployee && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
           role="dialog"

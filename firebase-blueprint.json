@@ -26,6 +26,10 @@
           "minLength": 1,
           "maxLength": 60
         },
+        "companyCategory": {
+          "type": "string",
+          "enum": ["Sukhsa Export Permanent", "Sukhsa Export Temporary"]
+        },
         "breakMinutes": {
           "type": "integer"
         },

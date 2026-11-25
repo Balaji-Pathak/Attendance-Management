@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -30,6 +30,7 @@ import {
   formatMonthLabel,
   getEmployeeSheetTabName,
   getTodayISO,
+  normalizeCompanyCategory,
   sortRecordsNewestFirst,
 } from './utils/time';
 import {
@@ -43,6 +44,7 @@ import {
 } from './services/firebaseAuth';
 import {
   adminAddEmail,
+  adminBackfillEmployeeCompanyCategories,
   adminDeleteAttendance,
   adminImportFromSheet,
   adminLoadStarterEmployees,
@@ -128,6 +130,7 @@ export default function App() {
 
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const backfilledEmpIdsRef = useRef<Set<string>>(new Set());
 
   const isAdminUnlocked = Boolean(googleUser && isAdminAuthorized && !isLockedBySession);
 
@@ -190,7 +193,16 @@ export default function App() {
     }
 
     const unsubEmps = subscribeAllEmployees(
-      (list) => setEmployees(list),
+      (list, missingCategory) => {
+        setEmployees(list);
+        const pending = missingCategory.filter((e) => !backfilledEmpIdsRef.current.has(e.id));
+        if (pending.length > 0) {
+          for (const emp of pending) {
+            backfilledEmpIdsRef.current.add(emp.id);
+          }
+          adminBackfillEmployeeCompanyCategories(pending).catch(() => {});
+        }
+      },
       (err) => setNotice({ type: 'error', message: err.message })
     );
     const unsubAtt = subscribeAllAttendance(
@@ -498,6 +510,7 @@ export default function App() {
         empCode: emp.empCode,
         name: emp.name,
         department: emp.department,
+        companyCategory: normalizeCompanyCategory(emp.companyCategory),
       };
       const exists = prev.some((e) => e.id === emp.id);
       const next = exists
@@ -538,32 +551,54 @@ export default function App() {
   };
 
   const handleSaveEmployee = async (emp: Employee, isNew: boolean) => {
+    const normalizedEmp: Employee = {
+      ...emp,
+      companyCategory: normalizeCompanyCategory(emp.companyCategory),
+    };
     const nextEmployees = isNew
-      ? [...employees, emp].sort((a, b) => a.empCode.localeCompare(b.empCode))
-      : employees.map((e) => (e.id === emp.id ? emp : e));
+      ? [...employees, normalizedEmp].sort((a, b) => a.empCode.localeCompare(b.empCode))
+      : employees.map((e) => (e.id === normalizedEmp.id ? normalizedEmp : e));
 
-    await adminSaveEmployee(emp);
-    upsertLocalEmployee(emp);
+    await adminSaveEmployee(normalizedEmp);
+    upsertLocalEmployee(normalizedEmp);
     setNotice({
       type: 'success',
-      message: `${isNew ? 'Added' : 'Updated'} ${emp.name}.`,
+      message: `${isNew ? 'Added' : 'Updated'} ${normalizedEmp.name} (${normalizedEmp.companyCategory}).`,
     });
 
-    if (sheetConfig && getAccessToken()) {
+    const token = getAccessToken();
+    if (token && (sheetConfig || normalizedEmp.individualSheetId)) {
+      const targetTitle = sheetConfig
+        ? sheetConfig.spreadsheetTitle
+        : `${normalizedEmp.empCode} - ${normalizedEmp.name} Attendance`;
+      const details: string[] = [];
+      if (sheetConfig) {
+        details.push('Updates Master Attendance & Employees tabs');
+        details.push(`Updates tab: ${getEmployeeSheetTabName(normalizedEmp.empCode, normalizedEmp.name)}`);
+      }
+      if (normalizedEmp.individualSheetId) {
+        details.push('Updates standalone Individual Google Sheet');
+      }
+
       setConfirmRequest({
         title: isNew ? 'Sync New Employee to Google Sheets?' : 'Sync Updated Employee to Google Sheets?',
-        description: `${emp.name} (${emp.empCode}) is saved. Update "${sheetConfig.spreadsheetTitle}" with their Employees row and individual tab now?`,
-        affectedTarget: sheetConfig.spreadsheetTitle,
-        details: [
-          'Updates Employees tab',
-          `Updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
-        ],
+        description: `${normalizedEmp.name} (${normalizedEmp.empCode} · ${normalizedEmp.companyCategory}) is saved. Update connected Google Sheets now?`,
+        affectedTarget: targetTitle,
+        details,
         confirmLabel: 'Sync to Sheet',
         onConfirm: async () => {
-          await syncOneEmployeeAndMaster(emp, nextEmployees, records);
+          if (sheetConfig) {
+            await syncOneEmployeeAndMaster(normalizedEmp, nextEmployees, records);
+          }
+          if (normalizedEmp.individualSheetId) {
+            const activeToken = getAccessToken();
+            if (activeToken) {
+              await createOrUpdateStandaloneEmployeeSheet(activeToken, normalizedEmp, records);
+            }
+          }
           setNotice({
             type: 'success',
-            message: `${isNew ? 'Added' : 'Updated'} ${emp.name} and synced to Google Sheets.`,
+            message: `${isNew ? 'Added' : 'Updated'} ${normalizedEmp.name} and synced Google Sheets.`,
           });
         },
       });

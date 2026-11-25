@@ -7,11 +7,24 @@ export type NavSection =
 
 export type AttendanceStatus = 'on_duty' | 'completed' | 'short_shift';
 
+export type CompanyCategory =
+  | 'Sukhsa Export Permanent'
+  | 'Sukhsa Export Temporary';
+
+export const COMPANY_CATEGORIES: readonly CompanyCategory[] = [
+  'Sukhsa Export Permanent',
+  'Sukhsa Export Temporary',
+] as const;
+
+export const DEFAULT_COMPANY_CATEGORY: CompanyCategory =
+  'Sukhsa Export Permanent';
+
 export interface Employee {
   id: string;
   empCode: string;
   name: string;
   department: string;
+  companyCategory?: CompanyCategory;
   breakMinutes: number; // Defaults to 30
   active: boolean;
   individualSheetId?: string;
@@ -52,6 +65,7 @@ export interface GateEmployeeView {
   empCode: string;
   name: string;
   department: string;
+  companyCategory?: CompanyCategory;
 }
 
 export interface SheetConfig {
