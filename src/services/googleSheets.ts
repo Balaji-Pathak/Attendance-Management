@@ -24,21 +24,16 @@ const DRIVE_BASE = 'https://www.googleapis.com/drive/v3/files';
 export const MASTER_TAB_NAME = 'Master Attendance';
 export const EMPLOYEES_TAB_NAME = 'Employees';
 
-const MASTER_HEADERS = [
-  'Date',
-  'Day',
+const MONTHLY_SUMMARY_HEADERS = [
   'Employee ID',
-  'Name',
-  'Company Category',
-  'In Time',
-  'Out Time',
-  'Away (mins)',
+  'Employee Name',
+  'Department',
+  'Hourly Rate',
   'Working Hours',
   'Present (P)',
-  'Overtime (hrs)',
+  'Theka Work (H)',
   'Normal Hours (H)',
-  'Hourly Rate',
-  'Payable Amount',
+  'Net Payable',
 ];
 
 const EMPLOYEES_HEADERS = [
@@ -185,49 +180,128 @@ export async function getSpreadsheetMetadata(
   );
 }
 
-function buildMasterRows(
-  records: AttendanceRecord[],
-  employees: Employee[] = []
-): (string | number)[][] {
-  const empById = new Map<string, Employee>();
-  const empByCode = new Map<string, Employee>();
-  for (const emp of employees) {
-    empById.set(emp.id, emp);
-    empByCode.set(emp.empCode, emp);
+function getCategoryMonthsToSync(
+  employees: Employee[],
+  records: AttendanceRecord[]
+): Array<{ ym: string; title: string }> {
+  const monthSet = new Set<string>();
+  for (const r of records) {
+    if (r.date && /^\d{4}-\d{2}/.test(r.date)) {
+      monthSet.add(r.date.slice(0, 7));
+    }
   }
+  for (const emp of employees) {
+    for (const [ym, mins] of Object.entries(emp.monthlyThikadaMinutes ?? {})) {
+      if (/^\d{4}-\d{2}$/.test(ym) && typeof mins === 'number' && mins > 0) {
+        monthSet.add(ym);
+      }
+    }
+  }
+  const now = new Date();
+  const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  monthSet.add(currentYm);
 
-  const sorted = [...records].sort((a, b) => {
-    if (a.date !== b.date) return b.date.localeCompare(a.date);
-    return b.inTime.localeCompare(a.inTime);
+  return Array.from(monthSet)
+    .sort((a, b) => b.localeCompare(a))
+    .map((ym) => ({ ym, title: formatMonthLabel(ym) }));
+}
+
+function buildMegaMonthlySummaryRows(
+  yearMonth: string,
+  employees: Employee[],
+  records: AttendanceRecord[],
+  companyCategory?: CompanyCategory
+): { rows: (string | number)[][]; employeeRowCount: number } {
+  const monthRecs = records.filter((r) => r.date.startsWith(yearMonth));
+
+  const summaryEmployees = employees
+    .filter((emp) => {
+      if (emp.active) return true;
+      const hasRecs = monthRecs.some(
+        (r) => r.empId === emp.id || r.empCode === emp.empCode
+      );
+      const hasTheka = (emp.monthlyThikadaMinutes?.[yearMonth] ?? 0) > 0;
+      return hasRecs || hasTheka;
+    })
+    .sort((a, b) => a.empCode.localeCompare(b.empCode));
+
+  const empRowCount = summaryEmployees.length;
+  const lastDataRow = empRowCount > 0 ? 3 + empRowCount : 4;
+  const totalRowIdx = 4 + empRowCount;
+
+  const bannerRow: (string | number)[] = [
+    'Company',
+    companyCategory ?? 'All Companies',
+    'Month',
+    formatMonthLabel(yearMonth),
+    'Employees',
+    empRowCount > 0 ? `=COUNTA(A4:A${lastDataRow})` : 0,
+    'Total Net Payable',
+    empRowCount > 0 ? `=I${totalRowIdx}` : 0,
+    'Payable = (Working - Theka) × Rate',
+  ];
+
+  const dataRows: (string | number)[][] = summaryEmployees.map((emp, idx) => {
+    const empMonthRecs = monthRecs.filter(
+      (r) => r.empId === emp.id || r.empCode === emp.empCode
+    );
+
+    let netMinutes = 0;
+    let presentCount = 0;
+    let grossNormalMinutes = 0;
+
+    for (const r of empMonthRecs) {
+      if (r.outTime && r.netMinutes !== null) {
+        netMinutes += r.netMinutes;
+        const p = getRecordPayroll(r);
+        presentCount += p.presentCount;
+        grossNormalMinutes += p.grossNormalMinutes;
+      }
+    }
+
+    const thekaMinutes = emp.monthlyThikadaMinutes?.[yearMonth] ?? 0;
+    const netNormalMinutes = Math.max(0, grossNormalMinutes - thekaMinutes);
+    const workingDecimal = Number((netMinutes / 60).toFixed(2));
+    const thekaDecimal = Number((thekaMinutes / 60).toFixed(2));
+    const netNormalDecimal = Number((netNormalMinutes / 60).toFixed(2));
+    const rate = getEmployeeHourlyRate(emp);
+    const rowNum = 4 + idx;
+
+    return [
+      emp.empCode,
+      emp.name,
+      emp.department || 'General',
+      rate,
+      workingDecimal,
+      presentCount,
+      thekaDecimal,
+      netNormalDecimal,
+      `=MAX(0, E${rowNum}-G${rowNum})*D${rowNum}`,
+    ];
   });
 
-  return [
-    MASTER_HEADERS,
-    ...sorted.map((r, idx) => {
-      const p = getRecordPayroll(r);
-      const hasOut = Boolean(r.outTime && r.netMinutes !== null);
-      const matchedEmp = empById.get(r.empId) ?? empByCode.get(r.empCode);
-      const companyCat = normalizeCompanyCategory(matchedEmp?.companyCategory);
-      const rate = getEmployeeHourlyRate(matchedEmp);
-      const rowNum = idx + 2;
-      return [
-        r.date,
-        getDayNameShort(r.date),
-        r.empCode,
-        r.empName,
-        companyCat,
-        formatDisplayTime(r.inTime),
-        r.outTime ? formatDisplayTime(r.outTime) : '',
-        Math.round((r.pausedTotalSeconds ?? 0) / 60),
-        r.netDecimalHours !== null ? r.netDecimalHours : '',
-        hasOut ? p.presentCount : '',
-        hasOut ? p.overtimeDecimalHours : '',
-        hasOut ? Number((p.grossNormalMinutes / 60).toFixed(2)) : '',
-        rate,
-        hasOut ? `=I${rowNum}*M${rowNum}` : '',
-      ];
-    }),
+  const rows: (string | number)[][] = [
+    bannerRow,
+    [],
+    MONTHLY_SUMMARY_HEADERS,
+    ...dataRows,
   ];
+
+  if (empRowCount > 0) {
+    rows.push([
+      'TOTAL',
+      `=COUNTA(A4:A${lastDataRow}) & " Staff"`,
+      '',
+      '',
+      `=SUM(E4:E${lastDataRow})`,
+      `=SUM(F4:F${lastDataRow})`,
+      `=SUM(G4:G${lastDataRow})`,
+      `=SUM(H4:H${lastDataRow})`,
+      `=SUM(I4:I${lastDataRow})`,
+    ]);
+  }
+
+  return { rows, employeeRowCount: empRowCount };
 }
 
 function buildEmployeesRows(employees: Employee[]): (string | number)[][] {
@@ -255,27 +329,6 @@ function getMonthlyThekaDecimal(employee: Employee, monthFilter?: string): numbe
     0
   );
   return Number((totalMins / 60).toFixed(2));
-}
-
-function getLatestActiveMonthForEmployee(
-  employee: Employee,
-  records: AttendanceRecord[]
-): string {
-  const now = new Date();
-  const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const empMonths = new Set<string>();
-  for (const r of records) {
-    if (
-      (r.empId === employee.id || r.empCode === employee.empCode) &&
-      r.date &&
-      /^\d{4}-\d{2}/.test(r.date)
-    ) {
-      empMonths.add(r.date.slice(0, 7));
-    }
-  }
-  if (empMonths.has(currentYm)) return currentYm;
-  const sorted = Array.from(empMonths).sort((a, b) => b.localeCompare(a));
-  return sorted[0] ?? currentYm;
 }
 
 function buildIndividualEmployeeRows(
@@ -397,15 +450,25 @@ function buildIndividualEmployeeRows(
 async function formatSheetHeaders(
   token: string,
   spreadsheetId: string,
-  sheetMeta: Array<{ sheetId: number; title: string; dataRowCount?: number }>
+  sheetMeta: Array<{
+    sheetId: number;
+    title: string;
+    dataRowCount?: number;
+    kind?: 'employees' | 'mega_month' | 'individual';
+  }>
 ): Promise<void> {
   const requests: unknown[] = [];
 
   for (const s of sheetMeta) {
-    const isIndividual = s.title !== MASTER_TAB_NAME && s.title !== EMPLOYEES_TAB_NAME;
-    const headerRowIndex = isIndividual ? 3 : 0;
-    const freezeCount = isIndividual ? 4 : 1;
-    const colCount = isIndividual ? 10 : s.title === MASTER_TAB_NAME ? 14 : 7;
+    const kind =
+      s.kind ??
+      (s.title === EMPLOYEES_TAB_NAME ? 'employees' : 'individual');
+    const headerRowIndex =
+      kind === 'individual' ? 3 : kind === 'mega_month' ? 2 : 0;
+    const freezeCount =
+      kind === 'individual' ? 4 : kind === 'mega_month' ? 3 : 1;
+    const colCount =
+      kind === 'individual' ? 10 : kind === 'mega_month' ? 9 : 7;
 
     requests.push({
       updateSheetProperties: {
@@ -440,43 +503,7 @@ async function formatSheetHeaders(
       },
     });
 
-    if (s.title === MASTER_TAB_NAME) {
-      // Format Hourly Rate (Col M) up to 5 decimals and Payable Amount (Col N) to 2 decimals
-      requests.push({
-        repeatCell: {
-          range: {
-            sheetId: s.sheetId,
-            startRowIndex: 1,
-            endRowIndex: 2000,
-            startColumnIndex: 12,
-            endColumnIndex: 13,
-          },
-          cell: {
-            userEnteredFormat: {
-              numberFormat: { type: 'NUMBER', pattern: '#,##0.00###' },
-            },
-          },
-          fields: 'userEnteredFormat.numberFormat',
-        },
-      });
-      requests.push({
-        repeatCell: {
-          range: {
-            sheetId: s.sheetId,
-            startRowIndex: 1,
-            endRowIndex: 2000,
-            startColumnIndex: 13,
-            endColumnIndex: 14,
-          },
-          cell: {
-            userEnteredFormat: {
-              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
-            },
-          },
-          fields: 'userEnteredFormat.numberFormat',
-        },
-      });
-    } else if (s.title === EMPLOYEES_TAB_NAME) {
+    if (kind === 'employees') {
       requests.push({
         repeatCell: {
           range: {
@@ -494,9 +521,177 @@ async function formatSheetHeaders(
           fields: 'userEnteredFormat.numberFormat',
         },
       });
-    }
+    } else if (kind === 'mega_month') {
+      // Banner Row 1
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 0,
+            endColumnIndex: 9,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.94, green: 0.97, blue: 0.97 },
+              textFormat: { bold: true, fontSize: 10 },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat)',
+        },
+      });
 
-    if (isIndividual) {
+      // Highlight H1 (Total Net Payable)
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 7,
+            endColumnIndex: 8,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.90, green: 0.98, blue: 0.94 },
+              textFormat: {
+                foregroundColor: { red: 0.04, green: 0.42, blue: 0.28 },
+                bold: true,
+                fontSize: 10,
+              },
+              numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,numberFormat)',
+        },
+      });
+
+      const bodyStart = 3;
+      const rowCount = s.dataRowCount ?? 0;
+      const totalRowIdx = bodyStart + rowCount;
+
+      // Reset body & leftover column styling
+      requests.push({
+        repeatCell: {
+          range: {
+            sheetId: s.sheetId,
+            startRowIndex: bodyStart,
+            endRowIndex: totalRowIdx + 20,
+            startColumnIndex: 0,
+            endColumnIndex: 14,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 1, green: 1, blue: 1 },
+              textFormat: {
+                foregroundColor: { red: 0.06, green: 0.09, blue: 0.16 },
+                bold: false,
+                fontSize: 10,
+              },
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat)',
+        },
+      });
+
+      if (rowCount > 0) {
+        // Hourly Rate (Col D) up to 5 decimals
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: totalRowIdx,
+              startColumnIndex: 3,
+              endColumnIndex: 4,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'NUMBER', pattern: '#,##0.00###' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        });
+        // Working Hours (E), Theka (G), Normal (H)
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: totalRowIdx + 1,
+              startColumnIndex: 4,
+              endColumnIndex: 5,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'NUMBER', pattern: '0.00' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        });
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: totalRowIdx + 1,
+              startColumnIndex: 6,
+              endColumnIndex: 8,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'NUMBER', pattern: '0.00' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        });
+        // Net Payable (Col I)
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: bodyStart,
+              endRowIndex: totalRowIdx + 1,
+              startColumnIndex: 8,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        });
+        // TOTAL row
+        requests.push({
+          repeatCell: {
+            range: {
+              sheetId: s.sheetId,
+              startRowIndex: totalRowIdx,
+              endRowIndex: totalRowIdx + 1,
+              startColumnIndex: 0,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.90, green: 0.98, blue: 0.94 },
+                textFormat: {
+                  foregroundColor: { red: 0.04, green: 0.42, blue: 0.28 },
+                  bold: true,
+                  fontSize: 10,
+                },
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          },
+        });
+      }
+    } else if (kind === 'individual') {
       requests.push({
         repeatCell: {
           range: {
@@ -584,7 +779,7 @@ async function formatSheetHeaders(
         },
       });
 
-      // Highlight J2 (Net Payable = Total Working * Hourly Rate) in banner
+      // Highlight J2 (Net Payable = (Total Working - Theka) * Hourly Rate) in banner
       requests.push({
         repeatCell: {
           range: {
@@ -609,7 +804,7 @@ async function formatSheetHeaders(
         },
       });
 
-      if (typeof s.dataRowCount === 'number' && s.dataRowCount > 0) {
+      if (typeof s.dataRowCount === 'number' && s.dataRowCount >= 0) {
         const bodyStart = 4;
         const totalRowIdx = 4 + s.dataRowCount;
         const thekaRowIdx = totalRowIdx + 1;
@@ -639,92 +834,94 @@ async function formatSheetHeaders(
           },
         });
 
-        // Format Payable Amount column (Col J) across data & summary rows
-        requests.push({
-          repeatCell: {
-            range: {
-              sheetId: s.sheetId,
-              startRowIndex: bodyStart,
-              endRowIndex: netPayableRowIdx + 1,
-              startColumnIndex: 9,
-              endColumnIndex: 10,
-            },
-            cell: {
-              userEnteredFormat: {
-                numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
+        if (s.dataRowCount > 0) {
+          // Format Payable Amount column (Col J) across data & summary rows
+          requests.push({
+            repeatCell: {
+              range: {
+                sheetId: s.sheetId,
+                startRowIndex: bodyStart,
+                endRowIndex: netPayableRowIdx + 1,
+                startColumnIndex: 9,
+                endColumnIndex: 10,
               },
-            },
-            fields: 'userEnteredFormat.numberFormat',
-          },
-        });
-
-        // TOTAL (Before Theka) row
-        requests.push({
-          repeatCell: {
-            range: {
-              sheetId: s.sheetId,
-              startRowIndex: totalRowIdx,
-              endRowIndex: totalRowIdx + 1,
-              startColumnIndex: 0,
-              endColumnIndex: 10,
-            },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 0.96, green: 0.97, blue: 0.98 },
-                textFormat: { bold: true, fontSize: 10 },
-              },
-            },
-            fields: 'userEnteredFormat(backgroundColor,textFormat)',
-          },
-        });
-
-        // Less: Theka Work (H) row
-        requests.push({
-          repeatCell: {
-            range: {
-              sheetId: s.sheetId,
-              startRowIndex: thekaRowIdx,
-              endRowIndex: thekaRowIdx + 1,
-              startColumnIndex: 0,
-              endColumnIndex: 10,
-            },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 1, green: 0.96, blue: 0.96 },
-                textFormat: {
-                  foregroundColor: { red: 0.72, green: 0.11, blue: 0.11 },
-                  bold: true,
-                  fontSize: 10,
+              cell: {
+                userEnteredFormat: {
+                  numberFormat: { type: 'NUMBER', pattern: '#,##0.00' },
                 },
               },
+              fields: 'userEnteredFormat.numberFormat',
             },
-            fields: 'userEnteredFormat(backgroundColor,textFormat)',
-          },
-        });
+          });
 
-        // NET PAYABLE (After Theka) row
-        requests.push({
-          repeatCell: {
-            range: {
-              sheetId: s.sheetId,
-              startRowIndex: netPayableRowIdx,
-              endRowIndex: netPayableRowIdx + 1,
-              startColumnIndex: 0,
-              endColumnIndex: 10,
-            },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 1, green: 0.96, blue: 0.85 },
-                textFormat: {
-                  foregroundColor: { red: 0.57, green: 0.25, blue: 0.05 },
-                  bold: true,
-                  fontSize: 10,
+          // TOTAL (Before Theka) row
+          requests.push({
+            repeatCell: {
+              range: {
+                sheetId: s.sheetId,
+                startRowIndex: totalRowIdx,
+                endRowIndex: totalRowIdx + 1,
+                startColumnIndex: 0,
+                endColumnIndex: 10,
+              },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 0.96, green: 0.97, blue: 0.98 },
+                  textFormat: { bold: true, fontSize: 10 },
                 },
               },
+              fields: 'userEnteredFormat(backgroundColor,textFormat)',
             },
-            fields: 'userEnteredFormat(backgroundColor,textFormat)',
-          },
-        });
+          });
+
+          // Less: Theka Work (H) row
+          requests.push({
+            repeatCell: {
+              range: {
+                sheetId: s.sheetId,
+                startRowIndex: thekaRowIdx,
+                endRowIndex: thekaRowIdx + 1,
+                startColumnIndex: 0,
+                endColumnIndex: 10,
+              },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 1, green: 0.96, blue: 0.96 },
+                  textFormat: {
+                    foregroundColor: { red: 0.72, green: 0.11, blue: 0.11 },
+                    bold: true,
+                    fontSize: 10,
+                  },
+                },
+              },
+              fields: 'userEnteredFormat(backgroundColor,textFormat)',
+            },
+          });
+
+          // NET PAYABLE (After Theka) row
+          requests.push({
+            repeatCell: {
+              range: {
+                sheetId: s.sheetId,
+                startRowIndex: netPayableRowIdx,
+                endRowIndex: netPayableRowIdx + 1,
+                startColumnIndex: 0,
+                endColumnIndex: 10,
+              },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 1, green: 0.96, blue: 0.85 },
+                  textFormat: {
+                    foregroundColor: { red: 0.57, green: 0.25, blue: 0.05 },
+                    bold: true,
+                    fontSize: 10,
+                  },
+                },
+              },
+              fields: 'userEnteredFormat(backgroundColor,textFormat)',
+            },
+          });
+        }
       }
     }
   }
@@ -747,16 +944,13 @@ export async function createMasterSpreadsheet(
   const scoped = filterByCompanyCategory(employees, records, companyCategory);
   const scopedEmps = scoped.employees;
   const scopedRecs = scoped.records;
+  const monthTabs = getCategoryMonthsToSync(scopedEmps, scopedRecs);
 
   const initialSheets = [
-    { properties: { title: MASTER_TAB_NAME, gridProperties: { frozenRowCount: 1 } } },
-    { properties: { title: EMPLOYEES_TAB_NAME, gridProperties: { frozenRowCount: 1 } } },
-    ...scopedEmps.map((e) => ({
-      properties: {
-        title: getEmployeeSheetTabName(e.empCode, e.name),
-        gridProperties: { frozenRowCount: 4 },
-      },
+    ...monthTabs.map((m) => ({
+      properties: { title: m.title, gridProperties: { frozenRowCount: 3 } },
     })),
+    { properties: { title: EMPLOYEES_TAB_NAME, gridProperties: { frozenRowCount: 1 } } },
   ];
 
   const created = await apiFetch<SpreadsheetMetadataResponse>(SHEETS_BASE, token, {
@@ -767,23 +961,20 @@ export async function createMasterSpreadsheet(
     }),
   });
 
+  const builtMonths = monthTabs.map((m) => ({
+    title: m.title,
+    ...buildMegaMonthlySummaryRows(m.ym, scopedEmps, scopedRecs, companyCategory),
+  }));
+
   const valueRanges = [
-    {
-      range: `'${MASTER_TAB_NAME}'!A1`,
-      values: buildMasterRows(scopedRecs, scopedEmps),
-    },
+    ...builtMonths.map((m) => ({
+      range: `'${m.title}'!A1`,
+      values: m.rows,
+    })),
     {
       range: `'${EMPLOYEES_TAB_NAME}'!A1`,
       values: buildEmployeesRows(scopedEmps),
     },
-    ...scopedEmps.map((e) => ({
-      range: `'${getEmployeeSheetTabName(e.empCode, e.name)}'!A1`,
-      values: buildIndividualEmployeeRows(
-        e,
-        scopedRecs,
-        getLatestActiveMonthForEmployee(e, scopedRecs)
-      ),
-    })),
   ];
 
   await apiFetch(
@@ -798,25 +989,15 @@ export async function createMasterSpreadsheet(
     }
   );
 
-  const empRowCountByTab = new Map(
-    scopedEmps.map((e) => {
-      const ym = getLatestActiveMonthForEmployee(e, scopedRecs);
-      return [
-        getEmployeeSheetTabName(e.empCode, e.name),
-        scopedRecs.filter(
-          (r) => (r.empId === e.id || r.empCode === e.empCode) && r.date.startsWith(ym)
-        ).length,
-      ];
-    })
-  );
-
+  const rowCountByTitle = new Map(builtMonths.map((m) => [m.title, m.employeeRowCount]));
   await formatSheetHeaders(
     token,
     created.spreadsheetId,
     created.sheets.map((s) => ({
       sheetId: s.properties.sheetId,
       title: s.properties.title,
-      dataRowCount: empRowCountByTab.get(s.properties.title),
+      kind: s.properties.title === EMPLOYEES_TAB_NAME ? 'employees' : 'mega_month',
+      dataRowCount: rowCountByTitle.get(s.properties.title),
     }))
   );
 
@@ -829,6 +1010,9 @@ export async function createMasterSpreadsheet(
     tabNames: created.sheets.map((s) => s.properties.title),
   };
 }
+
+const MONTH_LABEL_REGEX =
+  /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}$/;
 
 export async function syncFullWorkbook(
   token: string,
@@ -845,41 +1029,47 @@ export async function syncFullWorkbook(
   let meta = await getSpreadsheetMetadata(token, spreadsheetId);
   const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
 
-  const requiredTabs = [
-    MASTER_TAB_NAME,
-    EMPLOYEES_TAB_NAME,
-    ...scopedEmps.map((e) => getEmployeeSheetTabName(e.empCode, e.name)),
-  ];
+  const monthTabs = getCategoryMonthsToSync(scopedEmps, scopedRecs);
+  const requiredTabs = [...monthTabs.map((m) => m.title), EMPLOYEES_TAB_NAME];
   const requiredSet = new Set(requiredTabs);
   const extraRemoveSet = new Set(extraTabsToRemove);
-
-  const missingTabs = requiredTabs.filter((t) => !existingTitles.has(t));
-  const staleOtherTabs = meta.sheets.filter(
-    (s) =>
-      !requiredSet.has(s.properties.title) &&
-      (scoped.otherTabNames.has(s.properties.title) ||
-        extraRemoveSet.has(s.properties.title) ||
-        /^[A-Za-z0-9]+-[A-Za-z0-9_-]*\s+-\s+/.test(s.properties.title))
+  const currentCatEmpTabs = new Set(
+    scopedEmps.map((e) => getEmployeeSheetTabName(e.empCode, e.name))
   );
 
-  if (missingTabs.length > 0 || staleOtherTabs.length > 0) {
+  const missingTabs = requiredTabs.filter((t) => !existingTitles.has(t));
+  // Clean up legacy Master Attendance tab, old individual employee tabs in the Mega sheet, or empty old tabs
+  const staleTabs = meta.sheets.filter((s) => {
+    const t = s.properties.title;
+    if (requiredSet.has(t)) return false;
+    return (
+      t === MASTER_TAB_NAME ||
+      LEGACY_GENERIC_TABS.has(t) ||
+      scoped.otherTabNames.has(t) ||
+      currentCatEmpTabs.has(t) ||
+      extraRemoveSet.has(t) ||
+      MONTH_LABEL_REGEX.test(t) ||
+      /^[A-Za-z0-9]+-[A-Za-z0-9_-]*\s+-\s+/.test(t)
+    );
+  });
+
+  if (missingTabs.length > 0 || staleTabs.length > 0) {
     const tabRequests: unknown[] = [
       ...missingTabs.map((t) => ({
         addSheet: {
           properties: {
             title: t,
             gridProperties: {
-              frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
+              frozenRowCount: t === EMPLOYEES_TAB_NAME ? 1 : 3,
             },
           },
         },
       })),
     ];
 
-    // Only delete displaced employee tabs if at least 1 sheet will remain
-    const remainingCount = meta.sheets.length + missingTabs.length - staleOtherTabs.length;
+    const remainingCount = meta.sheets.length + missingTabs.length - staleTabs.length;
     if (remainingCount >= 1) {
-      for (const s of staleOtherTabs) {
+      for (const s of staleTabs) {
         tabRequests.push({
           deleteSheet: { sheetId: s.properties.sheetId },
         });
@@ -895,6 +1085,27 @@ export async function syncFullWorkbook(
     }
   }
 
+  // Order tabs cleanly: newest Month Summary tabs first, then Employees tab
+  const orderRequests: unknown[] = [];
+  requiredTabs.forEach((title, idx) => {
+    const sheet = meta.sheets.find((s) => s.properties.title === title);
+    if (sheet && sheet.properties.index !== idx) {
+      orderRequests.push({
+        updateSheetProperties: {
+          properties: { sheetId: sheet.properties.sheetId, index: idx },
+          fields: 'index',
+        },
+      });
+    }
+  });
+  if (orderRequests.length > 0) {
+    await apiFetch(`${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, token, {
+      method: 'POST',
+      body: JSON.stringify({ requests: orderRequests }),
+    });
+    meta = await getSpreadsheetMetadata(token, spreadsheetId);
+  }
+
   await apiFetch(
     `${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
     token,
@@ -906,17 +1117,17 @@ export async function syncFullWorkbook(
     }
   );
 
+  const builtMonths = monthTabs.map((m) => ({
+    title: m.title,
+    ...buildMegaMonthlySummaryRows(m.ym, scopedEmps, scopedRecs, companyCategory),
+  }));
+
   const valueRanges = [
-    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(scopedRecs, scopedEmps) },
-    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(scopedEmps) },
-    ...scopedEmps.map((e) => ({
-      range: `'${getEmployeeSheetTabName(e.empCode, e.name)}'!A1`,
-      values: buildIndividualEmployeeRows(
-        e,
-        scopedRecs,
-        getLatestActiveMonthForEmployee(e, scopedRecs)
-      ),
+    ...builtMonths.map((m) => ({
+      range: `'${m.title}'!A1`,
+      values: m.rows,
     })),
+    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(scopedEmps) },
   ];
 
   await apiFetch(
@@ -931,23 +1142,16 @@ export async function syncFullWorkbook(
     }
   );
 
-  const empRowCountByTab = new Map(
-    scopedEmps.map((e) => {
-      const ym = getLatestActiveMonthForEmployee(e, scopedRecs);
-      return [
-        getEmployeeSheetTabName(e.empCode, e.name),
-        scopedRecs.filter(
-          (r) => (r.empId === e.id || r.empCode === e.empCode) && r.date.startsWith(ym)
-        ).length,
-      ];
-    })
-  );
+  const rowCountByTitle = new Map(builtMonths.map((m) => [m.title, m.employeeRowCount]));
   const allManagedMeta = meta.sheets
-    .filter((s) => requiredTabs.includes(s.properties.title))
+    .filter((s) => requiredSet.has(s.properties.title))
     .map((s) => ({
       sheetId: s.properties.sheetId,
       title: s.properties.title,
-      dataRowCount: empRowCountByTab.get(s.properties.title),
+      kind: (s.properties.title === EMPLOYEES_TAB_NAME
+        ? 'employees'
+        : 'mega_month') as 'employees' | 'mega_month',
+      dataRowCount: rowCountByTitle.get(s.properties.title),
     }));
   if (allManagedMeta.length > 0) {
     await formatSheetHeaders(token, spreadsheetId, allManagedMeta);
@@ -966,120 +1170,12 @@ export async function syncFullWorkbook(
 export async function syncEmployeeAndMasterTabs(
   token: string,
   spreadsheetId: string,
-  employee: Employee,
+  _employee: Employee,
   employees: Employee[],
   records: AttendanceRecord[],
   companyCategory?: CompanyCategory
 ): Promise<SheetConfig> {
-  const effectiveCategory =
-    companyCategory ?? normalizeCompanyCategory(employee.companyCategory);
-  const scoped = filterByCompanyCategory(employees, records, effectiveCategory);
-  const scopedEmps = scoped.employees;
-  const scopedRecs = scoped.records;
-
-  let meta = await getSpreadsheetMetadata(token, spreadsheetId);
-  const existingTitles = new Set(meta.sheets.map((s) => s.properties.title));
-  const empTab = getEmployeeSheetTabName(employee.empCode, employee.name);
-  const belongsHere =
-    normalizeCompanyCategory(employee.companyCategory) === effectiveCategory;
-
-  const neededTabs = belongsHere
-    ? [MASTER_TAB_NAME, EMPLOYEES_TAB_NAME, empTab]
-    : [MASTER_TAB_NAME, EMPLOYEES_TAB_NAME];
-  const missingTabs = neededTabs.filter((t) => !existingTitles.has(t));
-  const staleOtherTabs = meta.sheets.filter(
-    (s) =>
-      scoped.otherTabNames.has(s.properties.title) &&
-      !neededTabs.includes(s.properties.title)
-  );
-
-  if (missingTabs.length > 0 || staleOtherTabs.length > 0) {
-    const tabRequests: unknown[] = missingTabs.map((t) => ({
-      addSheet: {
-        properties: {
-          title: t,
-          gridProperties: {
-            frozenRowCount: t === MASTER_TAB_NAME || t === EMPLOYEES_TAB_NAME ? 1 : 4,
-          },
-        },
-      },
-    }));
-
-    const remainingCount = meta.sheets.length + missingTabs.length - staleOtherTabs.length;
-    if (remainingCount >= 1) {
-      for (const s of staleOtherTabs) {
-        tabRequests.push({
-          deleteSheet: { sheetId: s.properties.sheetId },
-        });
-      }
-    }
-
-    await apiFetch(`${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, token, {
-      method: 'POST',
-      body: JSON.stringify({ requests: tabRequests }),
-    });
-    meta = await getSpreadsheetMetadata(token, spreadsheetId);
-  }
-
-  await apiFetch(
-    `${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
-    token,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        ranges: neededTabs.map((t) => `'${t}'!A1:Z5000`),
-      }),
-    }
-  );
-
-  const empLatestYm = getLatestActiveMonthForEmployee(employee, scopedRecs);
-  const dataToWrite = [
-    { range: `'${MASTER_TAB_NAME}'!A1`, values: buildMasterRows(scopedRecs, scopedEmps) },
-    { range: `'${EMPLOYEES_TAB_NAME}'!A1`, values: buildEmployeesRows(scopedEmps) },
-  ];
-  if (belongsHere) {
-    dataToWrite.push({
-      range: `'${empTab}'!A1`,
-      values: buildIndividualEmployeeRows(employee, scopedRecs, empLatestYm),
-    });
-  }
-
-  await apiFetch(
-    `${SHEETS_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
-    token,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        valueInputOption: 'USER_ENTERED',
-        data: dataToWrite,
-      }),
-    }
-  );
-
-  const empRowCount = scopedRecs.filter(
-    (r) =>
-      (r.empId === employee.id || r.empCode === employee.empCode) &&
-      r.date.startsWith(empLatestYm)
-  ).length;
-  const tabsToFormat = meta.sheets
-    .filter((s) => neededTabs.includes(s.properties.title))
-    .map((s) => ({
-      sheetId: s.properties.sheetId,
-      title: s.properties.title,
-      dataRowCount: s.properties.title === empTab ? empRowCount : undefined,
-    }));
-  if (tabsToFormat.length > 0) {
-    await formatSheetHeaders(token, spreadsheetId, tabsToFormat);
-  }
-
-  return {
-    companyCategory: effectiveCategory,
-    spreadsheetId: meta.spreadsheetId,
-    spreadsheetTitle: meta.properties.title,
-    spreadsheetUrl: meta.spreadsheetUrl,
-    lastSyncedAt: new Date().toISOString(),
-    tabNames: meta.sheets.map((s) => s.properties.title),
-  };
+  return syncFullWorkbook(token, spreadsheetId, employees, records, companyCategory);
 }
 
 const LEGACY_GENERIC_TABS = new Set(['Attendance', 'Sheet1', 'Sheet 1']);
@@ -1162,10 +1258,13 @@ export async function createOrUpdateStandaloneEmployeeSheet(
         });
       }
 
-      // Remove any remaining legacy mixed "Attendance" / "Sheet1" tabs once monthly tabs exist
+      // Remove any remaining legacy mixed tabs or now-empty monthly tabs once monthly tabs exist
+      const activeMonthTitles = new Set(monthTabs.map((t) => t.title));
       const leftoverLegacy = meta.sheets.filter(
         (s) =>
-          LEGACY_GENERIC_TABS.has(s.properties.title) &&
+          (LEGACY_GENERIC_TABS.has(s.properties.title) ||
+            (MONTH_LABEL_REGEX.test(s.properties.title) &&
+              !activeMonthTitles.has(s.properties.title))) &&
           s.properties.sheetId !== renamedLegacyId
       );
       const projectedSheetCount =

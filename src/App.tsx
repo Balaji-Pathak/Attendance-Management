@@ -547,9 +547,10 @@ export default function App() {
     employee: Employee,
     nextEmployees: Employee[],
     nextRecords: AttendanceRecord[],
-    overrideCategory?: CompanyCategory
+    overrideCategory?: CompanyCategory,
+    tokenOverride?: string
   ) => {
-    const token = getAccessToken();
+    const token = tokenOverride || getAccessToken();
     const targetCategory = overrideCategory ?? normalizeCompanyCategory(employee.companyCategory);
     const targetCfg = sheetConfigs[targetCategory];
     if (!token || !targetCfg) return;
@@ -631,10 +632,7 @@ export default function App() {
       }
       if (newMasterCfg) {
         details.push(
-          `Updates Master Attendance, Employees, and "${getEmployeeSheetTabName(
-            normalizedEmp.empCode,
-            normalizedEmp.name
-          )}" in "${newMasterCfg.spreadsheetTitle}" (${newCat})`
+          `Updates Monthly Summary & Employees tabs in "${newMasterCfg.spreadsheetTitle}" (${newCat})`
         );
       }
       if (hasStandalone) {
@@ -850,27 +848,72 @@ export default function App() {
     );
     const empCategory = emp ? normalizeCompanyCategory(emp.companyCategory) : null;
     const targetCfg = empCategory ? sheetConfigs[empCategory] : null;
+    const hasIndividualSheet = Boolean(emp?.individualSheetId);
+    const needsSheetSync = Boolean(emp && (targetCfg || hasIndividualSheet));
     const nextRecords = sortRecordsNewestFirst(
       records.map((r) => (r.id === updated.id ? updated : r))
     );
+    const recordMonth = updated.date.slice(0, 7);
 
-    if (targetCfg && getAccessToken() && emp && empCategory) {
+    if (needsSheetSync && emp) {
+      const details: string[] = [];
+      if (hasIndividualSheet) {
+        details.push(
+          `Updates "${formatMonthLabel(recordMonth)}" in ${emp.name}'s Individual Google Sheet`
+        );
+      }
+      if (targetCfg && empCategory) {
+        details.push(
+          `Updates ${formatMonthLabel(recordMonth)} summary in "${targetCfg.spreadsheetTitle}" (${empCategory})`
+        );
+      }
+
       setConfirmRequest({
         title: 'Update Entry in Google Sheets?',
-        description: `Save corrected timings for ${updated.empName} (${updated.date}) and update ${empCategory} Google Sheet.`,
-        affectedTarget: targetCfg.spreadsheetTitle,
-        details: [
-          'Updates Master Attendance tab',
-          `Updates tab: ${getEmployeeSheetTabName(emp.empCode, emp.name)}`,
-        ],
+        description: `Save corrected timings for ${updated.empName} (${updated.date}) and update connected Google Sheets.`,
+        affectedTarget: [
+          hasIndividualSheet ? `${emp.empCode} - ${emp.name} Attendance` : undefined,
+          targetCfg?.spreadsheetTitle,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        details,
         confirmLabel: 'Save & Sync',
         onConfirm: async () => {
-          await adminUpdateAttendance(updated);
-          await syncOneEmployeeAndMaster(emp, employees, nextRecords, empCategory);
-          setNotice({
-            type: 'success',
-            message: `Updated ${updated.empName}'s entry and synced to Google Sheets.`,
-          });
+          setIsSyncing(true);
+          try {
+            await adminUpdateAttendance(updated);
+            setRecords(nextRecords);
+            const activeToken = getAccessToken() || (await ensureGoogleToken());
+            if (activeToken) {
+              if (emp.individualSheetId) {
+                await createOrUpdateStandaloneEmployeeSheet(
+                  activeToken,
+                  emp,
+                  nextRecords,
+                  recordMonth
+                );
+              }
+              if (targetCfg && empCategory) {
+                await syncOneEmployeeAndMaster(
+                  emp,
+                  employees,
+                  nextRecords,
+                  empCategory,
+                  activeToken
+                );
+              }
+              await refreshDriveFiles(activeToken);
+            }
+            setNotice({
+              type: 'success',
+              message: `Updated ${updated.empName}'s entry and synced Google Sheets.`,
+            });
+          } catch (err) {
+            handleGoogleError(err, `Updated ${updated.empName}'s entry, but Google Sheets sync failed.`);
+          } finally {
+            setIsSyncing(false);
+          }
         },
       });
     } else {
@@ -888,27 +931,84 @@ export default function App() {
     );
     const empCategory = emp ? normalizeCompanyCategory(emp.companyCategory) : null;
     const targetCfg = empCategory ? sheetConfigs[empCategory] : null;
-    const hasSheet = Boolean(targetCfg && getAccessToken());
+    const hasIndividualSheet = Boolean(emp?.individualSheetId);
+    const needsSheetSync = Boolean(emp && (targetCfg || hasIndividualSheet));
+    const recordMonth = record.date.slice(0, 7);
+
+    const details: string[] = [
+      `Permanently removes ${record.empName}'s ${record.date} entry (no default row kept)`,
+    ];
+    if (hasIndividualSheet && emp) {
+      details.push(
+        `Updates "${formatMonthLabel(recordMonth)}" in ${emp.name}'s Individual Google Sheet`
+      );
+    }
+    if (targetCfg) {
+      details.push(
+        `Updates ${formatMonthLabel(recordMonth)} summary in "${targetCfg.spreadsheetTitle}"`
+      );
+    }
 
     setConfirmRequest({
-      title: 'Delete Attendance Record?',
-      description: `Permanently delete ${record.empName}'s entry for ${record.date}.`,
-      affectedTarget: hasSheet ? targetCfg?.spreadsheetTitle : undefined,
-      details: hasSheet
-        ? ['Removes row from Master Attendance and employee sheet tab']
-        : ['Removes entry from the attendance register'],
-      confirmLabel: 'Delete Entry',
+      title: `Delete Attendance for ${record.date}?`,
+      description: `Permanently delete ${record.empName}'s attendance record for ${record.date}.`,
+      affectedTarget:
+        [
+          hasIndividualSheet && emp ? `${emp.empCode} - ${emp.name} Attendance` : undefined,
+          targetCfg?.spreadsheetTitle,
+        ]
+          .filter(Boolean)
+          .join(' · ') || undefined,
+      details,
+      confirmLabel: 'Delete Attendance',
       destructive: true,
       onConfirm: async () => {
-        await adminDeleteAttendance(record.id);
-        const nextRecords = records.filter((r) => r.id !== record.id);
-        if (hasSheet && emp && empCategory) {
-          await syncOneEmployeeAndMaster(emp, employees, nextRecords, empCategory);
+        setIsSyncing(true);
+        try {
+          await adminDeleteAttendance(record.id);
+          const nextRecords = records.filter((r) => r.id !== record.id);
+          setRecords(nextRecords);
+
+          let sheetsUpdated = false;
+          if (needsSheetSync && emp) {
+            const activeToken = getAccessToken() || (await ensureGoogleToken());
+            if (activeToken) {
+              if (emp.individualSheetId) {
+                await createOrUpdateStandaloneEmployeeSheet(
+                  activeToken,
+                  emp,
+                  nextRecords,
+                  recordMonth
+                );
+              }
+              if (targetCfg && empCategory) {
+                await syncOneEmployeeAndMaster(
+                  emp,
+                  employees,
+                  nextRecords,
+                  empCategory,
+                  activeToken
+                );
+              }
+              await refreshDriveFiles(activeToken);
+              sheetsUpdated = true;
+            }
+          }
+
+          setNotice({
+            type: needsSheetSync && !sheetsUpdated ? 'info' : 'success',
+            message:
+              needsSheetSync && !sheetsUpdated
+                ? `Deleted ${record.empName}'s entry for ${record.date}. Connect Google Sheets and click "Update All Sheets" to sync.`
+                : sheetsUpdated
+                ? `Deleted ${record.empName}'s entry for ${record.date} and updated Google Sheets.`
+                : `Deleted attendance record for ${record.empName} (${record.date}).`,
+          });
+        } catch (err) {
+          handleGoogleError(err, `Could not delete record for ${record.date}.`);
+        } finally {
+          setIsSyncing(false);
         }
-        setNotice({
-          type: 'info',
-          message: `Deleted record for ${record.empName} (${record.date}).`,
-        });
       },
     });
   };
@@ -923,13 +1023,13 @@ export default function App() {
     const catRecords = getRecordsForCategory(employees, records, category);
 
     setConfirmRequest({
-      title: `Create ${category} Master Sheet?`,
-      description: `Create "${title}" in Google Drive for ${category} staff only.`,
+      title: `Create ${category} Mega Sheet?`,
+      description: `Create "${title}" in Google Drive with monthly summary tabs for ${category} staff.`,
       affectedTarget: title,
       details: [
-        `Master Attendance & Employees tabs for ${category} (${catEmployees.length} staff)`,
-        `Individual Tabs: ${catEmployees.length} employee tab(s)`,
-        `${catRecords.length} attendance record(s) included`,
+        `Separate tab per month listing all ${category} employees (${catEmployees.length} staff)`,
+        'Columns: Employee ID, Name, Working Hours, Present (P), Theka Work, Normal (H), Net Payable',
+        'Includes Employees roster tab',
       ],
       confirmLabel: 'Create Google Sheet',
       onConfirm: async () => {
@@ -1047,17 +1147,17 @@ export default function App() {
     setConfirmRequest({
       title:
         targetCategories.length === 1
-          ? `Sync ${targetCategories[0]} Master Sheet?`
-          : 'Sync Connected Company Master Sheets?',
-      description: `Update Master Attendance, Employees, and employee tabs cleanly by company category.`,
+          ? `Update ${targetCategories[0]} Mega Sheet?`
+          : 'Update Connected Company Mega Sheets?',
+      description: `Updates monthly summary tabs (Present P, Working Hours, Theka, Normal H, Net Payable) and Employees tab.`,
       affectedTarget: titles,
       details: targetCategories.map((cat) => {
         const count = employees.filter(
           (e) => normalizeCompanyCategory(e.companyCategory) === cat
         ).length;
-        return `${cat}: ${count} employee tab(s)`;
+        return `${cat}: ${count} employee(s) summarized per month`;
       }),
-      confirmLabel: 'Sync Master Sheets',
+      confirmLabel: 'Update Mega Sheets',
       onConfirm: async () => {
         setIsSyncing(true);
         try {
@@ -1196,24 +1296,23 @@ export default function App() {
       setActiveNav('sheets-sync');
       setNotice({
         type: 'info',
-        message: `Connect or create a ${category} Master Sheet first in Google Sheets Sync.`,
+        message: `Connect or create a ${category} Mega Sheet first in Google Sheets Sync.`,
       });
       return;
     }
     const token = await ensureGoogleToken();
     if (!token) return;
-    const tabName = getEmployeeSheetTabName(employee.empCode, employee.name);
 
     setConfirmRequest({
-      title: `Sync ${employee.name}'s Tab?`,
-      description: `Update "${tabName}" and Master Attendance in "${targetCfg.spreadsheetTitle}" (${category}).`,
-      affectedTarget: `${targetCfg.spreadsheetTitle} · ${tabName}`,
-      confirmLabel: 'Sync Tab',
+      title: `Update ${category} Mega Sheet?`,
+      description: `Update monthly summary tabs (including ${employee.name}) in "${targetCfg.spreadsheetTitle}".`,
+      affectedTarget: targetCfg.spreadsheetTitle,
+      confirmLabel: 'Update Mega Sheet',
       onConfirm: async () => {
-        await syncOneEmployeeAndMaster(employee, employees, records, category);
+        await syncOneEmployeeAndMaster(employee, employees, records, category, token);
         setNotice({
           type: 'success',
-          message: `Synced "${tabName}" in ${category} Master Sheet.`,
+          message: `Updated monthly summaries in ${category} Mega Sheet.`,
         });
       },
     });
@@ -1443,12 +1542,50 @@ export default function App() {
           updatedAt: new Date().toISOString(),
         };
 
-    setRecords((prev) =>
-      sortRecordsNewestFirst(prev.map((r) => (r.id === recalculated.id ? recalculated : r)))
+    const nextRecords = sortRecordsNewestFirst(
+      records.map((r) => (r.id === recalculated.id ? recalculated : r))
     );
+    setRecords(nextRecords);
+
+    const emp = employees.find(
+      (e) => e.id === recalculated.empId || e.empCode === recalculated.empCode
+    );
+    const token = getAccessToken();
+    let sheetUpdated = false;
+    if (token && emp) {
+      const empCategory = normalizeCompanyCategory(emp.companyCategory);
+      const targetCfg = sheetConfigs[empCategory];
+      const recordMonth = recalculated.date.slice(0, 7);
+      if (emp.individualSheetId || targetCfg) {
+        setIsSyncing(true);
+        try {
+          if (emp.individualSheetId) {
+            await createOrUpdateStandaloneEmployeeSheet(
+              token,
+              emp,
+              nextRecords,
+              recordMonth
+            );
+            sheetUpdated = true;
+          }
+          if (targetCfg) {
+            await syncOneEmployeeAndMaster(emp, employees, nextRecords, empCategory, token);
+            sheetUpdated = true;
+          }
+        } catch (err) {
+          handleGoogleError(err, `Updated ${updated.empName} (${updated.date}), but sheet sync failed.`);
+          return;
+        } finally {
+          setIsSyncing(false);
+        }
+      }
+    }
+
     setNotice({
       type: 'success',
-      message: `Updated ${updated.empName} (${updated.date}).`,
+      message: sheetUpdated
+        ? `Updated ${updated.empName} (${updated.date}) and synced Google Sheets.`
+        : `Updated ${updated.empName} (${updated.date}).`,
     });
   };
 
@@ -2010,6 +2147,7 @@ export default function App() {
               onImportEmployeeSheet={handleImportEmployeeSheet}
               onSaveEmployeeMonthRecords={handleSaveEmployeeMonthRecords}
               onUpdateSingleRecord={handleUpdateSingleRecord}
+              onDeleteSingleRecord={handleDeleteRecord}
               onSaveMonthlyThikada={handleSaveMonthlyThikada}
             />
           )}

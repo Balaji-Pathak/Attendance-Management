@@ -9,6 +9,7 @@ import {
   FolderInput,
   History,
   RefreshCw,
+  Trash2,
   UserCheck,
   X,
 } from 'lucide-react';
@@ -29,7 +30,6 @@ import {
   getCurrentYearMonth,
   getDayNameShort,
   getEmployeeHourlyRate,
-  getEmployeeSheetTabName,
   getMonthDays,
   getRecordPayroll,
   normalizeCompanyCategory,
@@ -52,6 +52,7 @@ interface IndividualEmployeeViewProps {
     monthFilter?: string
   ) => Promise<void>;
   onUpdateSingleRecord: (updated: AttendanceRecord) => Promise<void>;
+  onDeleteSingleRecord: (record: AttendanceRecord) => void;
   onSaveMonthlyThikada: (
     employee: Employee,
     yearMonth: string,
@@ -86,6 +87,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
   onImportEmployeeSheet,
   onSaveEmployeeMonthRecords,
   onUpdateSingleRecord,
+  onDeleteSingleRecord,
   onSaveMonthlyThikada,
 }) => {
   const currentYearMonth = getCurrentYearMonth();
@@ -687,9 +689,6 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
     );
   }
 
-  const tabName = selectedEmployee
-    ? getEmployeeSheetTabName(selectedEmployee.empCode, selectedEmployee.name)
-    : '';
   const sheetConfig = selectedEmployee
     ? sheetConfigs[normalizeCompanyCategory(selectedEmployee.companyCategory)]
     : null;
@@ -850,8 +849,8 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
             <div className="text-xs text-slate-600">
               {sheetConfig
-                ? `Master Sheet tab: ${tabName}`
-                : 'Connect a Master Google Sheet in Google Sheets Sync to sync tabs.'}
+                ? `Mega Sheet: ${sheetConfig.spreadsheetTitle} (Monthly Summary Tabs)`
+                : 'Connect a Mega Google Sheet in Google Sheets Sync to sync monthly summaries.'}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -877,7 +876,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  <span>Sync Master Tab</span>
+                  <span>Update Mega Sheet</span>
                 </button>
               )}
 
@@ -1343,7 +1342,7 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                         </th>
                         <th className="px-3 py-2.5 font-medium whitespace-nowrap">Status</th>
                         <th className="px-4 py-2.5 font-medium text-right whitespace-nowrap">
-                          Edit
+                          Actions
                         </th>
                       </tr>
                     </thead>
@@ -1511,14 +1510,27 @@ export const IndividualEmployeeView: React.FC<IndividualEmployeeViewProps> = ({
                                   </button>
                                 </div>
                               ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingRow({ ...r })}
-                                  className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                                  aria-label={`Edit ${r.date}`}
-                                >
-                                  <Edit3 className="h-3.5 w-3.5" />
-                                </button>
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingRow({ ...r })}
+                                    className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                                    aria-label={`Edit ${r.date}`}
+                                  >
+                                    <Edit3 className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingRow(null);
+                                      onDeleteSingleRecord(r);
+                                    }}
+                                    className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700"
+                                    aria-label={`Delete ${r.date}`}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>
