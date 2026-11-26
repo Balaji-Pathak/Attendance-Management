@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
@@ -17,6 +18,8 @@ import {
   CompanyCategory,
   Employee,
   GateEmployeeView,
+  GuardAccount,
+  GuardSession,
   SheetConfig,
 } from '../types/attendance';
 import {
@@ -35,7 +38,62 @@ const EMPLOYEES_COL = 'employees';
 const ATTENDANCE_COL = 'attendance';
 const SETTINGS_COL = 'settings';
 const ADMIN_EMAILS_COL = 'admin_emails';
+const GUARDS_COL = 'guards';
+const GUARD_SALTS_COL = 'guard_salts';
+const GUARD_SESSIONS_COL = 'guard_sessions';
 const LEGACY_WORKSPACE_DOC_ID = 'workspace';
+
+const GUARD_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+export function normalizeGuardUsername(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+export function isValidGuardUsernameFormat(raw: string): boolean {
+  const trimmed = raw.trim();
+  return trimmed.length >= 3 && trimmed.length <= 40 && /^[a-zA-Z0-9_-]+$/.test(trimmed);
+}
+
+function generateHexBytes(byteLength = 16): string {
+  const bytes = new Uint8Array(byteLength);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLength; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function hashGuardPassword(password: string, saltHex: string): Promise<string> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('Secure browser cryptography is required for guard login.');
+  }
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(password),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits']
+  );
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: encoder.encode(`gatelog:${saltHex}`),
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(derivedBits))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
 
 export function getWorkspaceDocId(category: CompanyCategory): string {
   return category === 'Sukhsa Export Temporary'
@@ -178,6 +236,10 @@ function docToAttendanceRecord(id: string, data: Record<string, unknown>): Atten
     isSunday,
     status: (data.status as AttendanceRecord['status']) || 'on_duty',
     syncedToSheet: Boolean(data.syncedToSheet),
+    guardSessionId:
+      typeof data.guardSessionId === 'string' ? data.guardSessionId : undefined,
+    markedByGuard:
+      typeof data.markedByGuard === 'string' ? data.markedByGuard : undefined,
     updatedAt,
   };
 }
@@ -241,13 +303,27 @@ export function subscribeTodayAttendance(
   );
 }
 
-export async function guardMarkIn(employee: GateEmployeeView): Promise<AttendanceRecord> {
+function buildGuardSessionFields(guardSession?: GuardSession | null): Record<string, string> {
+  if (!guardSession?.sessionId || !guardSession?.username) {
+    return {};
+  }
+  return {
+    guardSessionId: guardSession.sessionId,
+    markedByGuard: guardSession.username,
+  };
+}
+
+export async function guardMarkIn(
+  employee: GateEmployeeView,
+  guardSession?: GuardSession | null
+): Promise<AttendanceRecord> {
   const date = getTodayISO();
   const inTime = getCurrentHHMM();
   const nowMs = Date.now();
   const isSunday = isSundayISO(date);
   const docId = `${date}_${employee.id}`;
   const path = `${ATTENDANCE_COL}/${docId}`;
+  const sessionFields = buildGuardSessionFields(guardSession);
 
   const payload = {
     id: docId,
@@ -274,6 +350,7 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
     isSunday,
     status: 'on_duty' as const,
     syncedToSheet: false,
+    ...sessionFields,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -305,6 +382,7 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
       isSunday,
       status: 'on_duty',
       syncedToSheet: false,
+      ...sessionFields,
       updatedAt: new Date().toISOString(),
     };
   } catch (error) {
@@ -312,11 +390,15 @@ export async function guardMarkIn(employee: GateEmployeeView): Promise<Attendanc
   }
 }
 
-export async function guardPauseTiming(record: AttendanceRecord): Promise<AttendanceRecord> {
+export async function guardPauseTiming(
+  record: AttendanceRecord,
+  guardSession?: GuardSession | null
+): Promise<AttendanceRecord> {
   const nowMs = Date.now();
   const path = `${ATTENDANCE_COL}/${record.id}`;
   const isSunday = record.isSunday ?? isSundayISO(record.date);
   const pausedTotalSeconds = Math.max(0, Math.round(record.pausedTotalSeconds ?? 0));
+  const sessionFields = buildGuardSessionFields(guardSession);
 
   try {
     await updateDoc(doc(db, ATTENDANCE_COL, record.id), {
@@ -326,6 +408,7 @@ export async function guardPauseTiming(record: AttendanceRecord): Promise<Attend
       isSunday,
       overtimeMinutes: record.overtimeMinutes ?? null,
       overtimeDecimalHours: record.overtimeDecimalHours ?? null,
+      ...sessionFields,
       updatedAt: serverTimestamp(),
     });
 
@@ -335,6 +418,7 @@ export async function guardPauseTiming(record: AttendanceRecord): Promise<Attend
       pausedAtMs: nowMs,
       pausedTotalSeconds,
       isSunday,
+      ...sessionFields,
       updatedAt: new Date().toISOString(),
     };
   } catch (error) {
@@ -342,7 +426,10 @@ export async function guardPauseTiming(record: AttendanceRecord): Promise<Attend
   }
 }
 
-export async function guardResumeTiming(record: AttendanceRecord): Promise<AttendanceRecord> {
+export async function guardResumeTiming(
+  record: AttendanceRecord,
+  guardSession?: GuardSession | null
+): Promise<AttendanceRecord> {
   const nowMs = Date.now();
   const path = `${ATTENDANCE_COL}/${record.id}`;
   const isSunday = record.isSunday ?? isSundayISO(record.date);
@@ -352,6 +439,7 @@ export async function guardResumeTiming(record: AttendanceRecord): Promise<Atten
     86400,
     Math.max(0, Math.round(record.pausedTotalSeconds ?? 0)) + pauseDeltaSec
   );
+  const sessionFields = buildGuardSessionFields(guardSession);
 
   try {
     await updateDoc(doc(db, ATTENDANCE_COL, record.id), {
@@ -361,6 +449,7 @@ export async function guardResumeTiming(record: AttendanceRecord): Promise<Atten
       isSunday,
       overtimeMinutes: record.overtimeMinutes ?? null,
       overtimeDecimalHours: record.overtimeDecimalHours ?? null,
+      ...sessionFields,
       updatedAt: serverTimestamp(),
     });
 
@@ -370,6 +459,7 @@ export async function guardResumeTiming(record: AttendanceRecord): Promise<Atten
       pausedAtMs: null,
       pausedTotalSeconds: nextPausedTotalSeconds,
       isSunday,
+      ...sessionFields,
       updatedAt: new Date().toISOString(),
     };
   } catch (error) {
@@ -377,10 +467,14 @@ export async function guardResumeTiming(record: AttendanceRecord): Promise<Atten
   }
 }
 
-export async function guardMarkOut(record: AttendanceRecord): Promise<AttendanceRecord> {
+export async function guardMarkOut(
+  record: AttendanceRecord,
+  guardSession?: GuardSession | null
+): Promise<AttendanceRecord> {
   const nowMs = Date.now();
   const outTime = getCurrentHHMM();
   const path = `${ATTENDANCE_COL}/${record.id}`;
+  const sessionFields = buildGuardSessionFields(guardSession);
 
   const extraPauseSec =
     record.isPaused && record.pausedAtMs
@@ -429,6 +523,7 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
       isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
+      ...sessionFields,
       updatedAt: serverTimestamp(),
     });
 
@@ -451,10 +546,80 @@ export async function guardMarkOut(record: AttendanceRecord): Promise<Attendance
       isSunday: calc.isSunday,
       status: calc.status,
       syncedToSheet: false,
+      ...sessionFields,
       updatedAt: new Date().toISOString(),
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+// ============================================================================
+// GUARD AUTHENTICATION (Rule-verified username & password login)
+// ============================================================================
+export async function guardSignIn(
+  usernameRaw: string,
+  password: string
+): Promise<GuardSession> {
+  const usernameKey = normalizeGuardUsername(usernameRaw);
+  if (!isValidGuardUsernameFormat(usernameKey) || !password) {
+    throw new Error('Invalid guard username or password.');
+  }
+
+  let saltSnap;
+  try {
+    saltSnap = await getDoc(doc(db, GUARD_SALTS_COL, usernameKey));
+  } catch {
+    throw new Error('Could not verify guard credentials. Please try again.');
+  }
+
+  if (!saltSnap.exists()) {
+    throw new Error('Invalid guard username or password.');
+  }
+
+  const salt = String(saltSnap.data()?.salt ?? '');
+  if (!salt) {
+    throw new Error('Invalid guard username or password.');
+  }
+
+  const authProof = await hashGuardPassword(password, salt);
+  const sessionId = `gs_${generateHexBytes(16)}`;
+  const expiresAtMs = Date.now() + GUARD_SESSION_TTL_MS;
+
+  try {
+    await setDoc(doc(db, GUARD_SESSIONS_COL, sessionId), {
+      id: sessionId,
+      guardUsername: usernameKey,
+      authProof,
+      active: true,
+      expiresAtMs,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    const code = (err as { code?: string })?.code ?? '';
+    if (code === 'permission-denied') {
+      throw new Error('Invalid guard username or password, or account is inactive.');
+    }
+    throw new Error('Could not sign in as guard. Please try again.');
+  }
+
+  return {
+    sessionId,
+    username: usernameKey,
+    displayName: usernameKey,
+    role: 'guard',
+    expiresAtMs,
+  };
+}
+
+export async function guardSignOut(sessionId: string): Promise<void> {
+  if (!sessionId) return;
+  try {
+    await updateDoc(doc(db, GUARD_SESSIONS_COL, sessionId), {
+      active: false,
+    });
+  } catch {
+    // Best-effort server-side session revocation
   }
 }
 
@@ -984,6 +1149,215 @@ export async function adminRemoveEmail(email: string): Promise<void> {
   const path = `${ADMIN_EMAILS_COL}/${emailLower}`;
   try {
     await deleteDoc(doc(db, ADMIN_EMAILS_COL, emailLower));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+// ============================================================================
+// ADMIN GUARD CREDENTIALS MANAGEMENT (Username + Password + Role: 'guard')
+// ============================================================================
+export function subscribeGuardAccounts(
+  onData: (guards: GuardAccount[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  return onSnapshot(
+    collection(db, GUARDS_COL),
+    (snapshot) => {
+      const toIso = (raw: unknown): string => {
+        const ts = raw as { toDate?: () => Date } | string | undefined;
+        if (ts && typeof ts === 'object' && typeof ts.toDate === 'function') {
+          return ts.toDate().toISOString();
+        }
+        return typeof ts === 'string' ? ts : new Date().toISOString();
+      };
+      const list: GuardAccount[] = snapshot.docs
+        .map((d) => {
+          const data = d.data();
+          return {
+            id: String(data.id ?? d.id),
+            username: String(data.username ?? d.id),
+            displayName: String(data.displayName ?? data.username ?? d.id),
+            role: 'guard' as const,
+            active: data.active !== false,
+            createdBy: String(data.createdBy ?? ''),
+            createdAt: toIso(data.createdAt),
+            updatedAt: toIso(data.updatedAt),
+          };
+        })
+        .sort((a, b) => a.username.localeCompare(b.username));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, GUARDS_COL);
+      } catch (wrapped) {
+        onError(wrapped as Error);
+      }
+    }
+  );
+}
+
+export interface SaveGuardAccountInput {
+  isNew: boolean;
+  previousId?: string;
+  username: string;
+  displayName: string;
+  password?: string;
+  active: boolean;
+  createdBy: string;
+}
+
+export async function adminSaveGuardAccount(
+  input: SaveGuardAccountInput
+): Promise<void> {
+  const trimmedUsername = input.username.trim();
+  if (!isValidGuardUsernameFormat(trimmedUsername)) {
+    throw new Error(
+      'Guard username must be 3-40 characters using only letters, numbers, underscores (_) or hyphens (-).'
+    );
+  }
+  const usernameKey = normalizeGuardUsername(trimmedUsername);
+  const cleanDisplayName = (input.displayName.trim() || trimmedUsername).slice(0, 80);
+  const cleanPassword = input.password ?? '';
+  const cleanCreatedBy = (input.createdBy || 'admin').trim().toLowerCase().slice(0, 120);
+
+  if (input.isNew && cleanPassword.length < 4) {
+    throw new Error('Password must be at least 4 characters.');
+  }
+  if (!input.isNew && cleanPassword.length > 0 && cleanPassword.length < 4) {
+    throw new Error('New password must be at least 4 characters.');
+  }
+
+  const isRename = Boolean(!input.isNew && input.previousId && input.previousId !== usernameKey);
+  const path = `${GUARDS_COL}/${usernameKey}`;
+
+  try {
+    if (input.isNew || isRename) {
+      const existingTarget = await getDoc(doc(db, GUARDS_COL, usernameKey));
+      if (existingTarget.exists()) {
+        throw new Error(`Guard username "${trimmedUsername}" already exists.`);
+      }
+    }
+
+    if (input.isNew) {
+      const salt = generateHexBytes(16);
+      const passwordHash = await hashGuardPassword(cleanPassword, salt);
+      const batch = writeBatch(db);
+      batch.set(doc(db, GUARDS_COL, usernameKey), {
+        id: usernameKey,
+        username: trimmedUsername,
+        displayName: cleanDisplayName,
+        role: 'guard',
+        passwordHash,
+        active: Boolean(input.active),
+        createdBy: cleanCreatedBy,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, GUARD_SALTS_COL, usernameKey), {
+        id: usernameKey,
+        salt,
+        updatedAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return;
+    }
+
+    if (isRename && input.previousId) {
+      const oldGuardSnap = await getDoc(doc(db, GUARDS_COL, input.previousId));
+      const oldSaltSnap = await getDoc(doc(db, GUARD_SALTS_COL, input.previousId));
+      if (!oldGuardSnap.exists()) {
+        throw new Error('Original guard account could not be found.');
+      }
+
+      let nextSalt: string;
+      let nextHash: string;
+      if (cleanPassword.length > 0) {
+        nextSalt = generateHexBytes(16);
+        nextHash = await hashGuardPassword(cleanPassword, nextSalt);
+      } else {
+        nextSalt = String(oldSaltSnap.data()?.salt ?? '');
+        nextHash = String(oldGuardSnap.data()?.passwordHash ?? '');
+        if (!nextSalt || !nextHash) {
+          throw new Error('Please enter a password when renaming this guard account.');
+        }
+      }
+
+      const batch = writeBatch(db);
+      batch.set(doc(db, GUARDS_COL, usernameKey), {
+        id: usernameKey,
+        username: trimmedUsername,
+        displayName: cleanDisplayName,
+        role: 'guard',
+        passwordHash: nextHash,
+        active: Boolean(input.active),
+        createdBy: String(oldGuardSnap.data()?.createdBy ?? cleanCreatedBy),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, GUARD_SALTS_COL, usernameKey), {
+        id: usernameKey,
+        salt: nextSalt,
+        updatedAt: serverTimestamp(),
+      });
+      batch.delete(doc(db, GUARDS_COL, input.previousId));
+      batch.delete(doc(db, GUARD_SALTS_COL, input.previousId));
+      await batch.commit();
+      return;
+    }
+
+    // Update existing guard at the same username key
+    const batch = writeBatch(db);
+    const guardUpdates: Record<string, unknown> = {
+      username: trimmedUsername,
+      displayName: cleanDisplayName,
+      active: Boolean(input.active),
+      updatedAt: serverTimestamp(),
+    };
+
+    if (cleanPassword.length > 0) {
+      const newSalt = generateHexBytes(16);
+      const newHash = await hashGuardPassword(cleanPassword, newSalt);
+      guardUpdates.passwordHash = newHash;
+      batch.set(doc(db, GUARD_SALTS_COL, usernameKey), {
+        id: usernameKey,
+        salt: newSalt,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    batch.update(doc(db, GUARDS_COL, usernameKey), guardUpdates);
+    await batch.commit();
+  } catch (error) {
+    const err = error as Error & { code?: string };
+    if (!err.code && err.message) {
+      throw err;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminToggleGuardActive(guard: GuardAccount): Promise<void> {
+  const path = `${GUARDS_COL}/${guard.id}`;
+  try {
+    await updateDoc(doc(db, GUARDS_COL, guard.id), {
+      active: !guard.active,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function adminDeleteGuardAccount(guardId: string): Promise<void> {
+  const safeId = normalizeGuardUsername(guardId);
+  const path = `${GUARDS_COL}/${safeId}`;
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, GUARDS_COL, safeId));
+    batch.delete(doc(db, GUARD_SALTS_COL, safeId));
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }

@@ -151,6 +151,18 @@
         "syncedToSheet": {
           "type": "boolean"
         },
+        "guardSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "markedByGuard": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -253,6 +265,127 @@
         }
       },
       "required": ["email", "addedBy", "createdAt"]
+    },
+    "GuardAccount": {
+      "title": "GuardAccount",
+      "description": "Admin-managed guard gate operator account authenticated via username and password.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "enum": ["guard"]
+        },
+        "passwordHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 128,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "username",
+        "displayName",
+        "role",
+        "passwordHash",
+        "active",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GuardSalt": {
+      "title": "GuardSalt",
+      "description": "Per-guard cryptographic salt lookup document keyed by lowercase guard username (no hashes or secrets).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
+        "salt": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "salt", "updatedAt"]
+    },
+    "GuardSession": {
+      "title": "GuardSession",
+      "description": "Rule-verified active guard login session validated against GuardAccount passwordHash.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "guardUsername": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
+        "authProof": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 128,
+          "pattern": "^[a-f0-9]+$"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "expiresAtMs": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "guardUsername", "authProof", "active", "expiresAtMs", "createdAt"]
     }
   },
   "firestore": {
@@ -262,7 +395,7 @@
     },
     "/attendance/{recordId}": {
       "schema": { "$ref": "#/entities/AttendanceRecord" },
-      "description": "Daily attendance records keyed by {date}_{empId}. Guard creates check-in and completes check-out once; Admin can review, edit, or delete."
+      "description": "Daily attendance records keyed by {date}_{empId}. Guard creates check-in and completes check-out with an active guard session; Admin can review, edit, or delete."
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/WorkspaceSettings" },
@@ -275,6 +408,18 @@
     "/admin_emails/{email}": {
       "schema": { "$ref": "#/entities/AdminEmail" },
       "description": "Company Admin Gmail allowlist keyed by lowercase email address."
+    },
+    "/guards/{guardId}": {
+      "schema": { "$ref": "#/entities/GuardAccount" },
+      "description": "Admin-only guard credentials and role records keyed by lowercase username."
+    },
+    "/guard_salts/{guardId}": {
+      "schema": { "$ref": "#/entities/GuardSalt" },
+      "description": "Non-enumerable per-guard salt lookup documents for password hashing."
+    },
+    "/guard_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/GuardSession" },
+      "description": "Active guard session tokens verified against /guards passwordHash on creation."
     }
   }
 }

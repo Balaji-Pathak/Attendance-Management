@@ -58,7 +58,28 @@ export interface AttendanceRecord {
   isSunday?: boolean;
   status: AttendanceStatus;
   syncedToSheet: boolean;
+  guardSessionId?: string;
+  markedByGuard?: string;
   updatedAt: string;
+}
+
+export interface GuardAccount {
+  id: string; // Normalized lowercase username
+  username: string;
+  displayName: string;
+  role: 'guard';
+  active: boolean;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GuardSession {
+  sessionId: string;
+  username: string;
+  displayName: string;
+  role: 'guard';
+  expiresAtMs: number;
 }
 
 export interface GateEmployeeView {

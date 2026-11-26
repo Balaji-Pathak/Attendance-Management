@@ -33,6 +33,8 @@ interface GuardGateViewProps {
   employees: GateEmployeeView[];
   todayRecords: AttendanceRecord[];
   serverDate: string;
+  isAdminMode?: boolean;
+  guardUsername?: string | null;
   onMarkIn: (empId: string) => Promise<void>;
   onPauseTiming: (recordId: string) => Promise<void>;
   onResumeTiming: (recordId: string) => Promise<void>;
@@ -52,6 +54,8 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
   employees,
   todayRecords,
   serverDate,
+  isAdminMode = false,
+  guardUsername = null,
   onMarkIn,
   onPauseTiming,
   onResumeTiming,
@@ -201,7 +205,11 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
             <div className="font-medium text-slate-900">
               8h Shift · 30m Lunch Break Deducted Only for 4.5h+ Shifts
             </div>
-            <div>Use Stop Timing when staff step out for tea or errands</div>
+            <div>
+              {guardUsername
+                ? `Guard Operator: @${guardUsername} · Use Stop Timing for tea or errands`
+                : 'Use Stop Timing when staff step out for tea or errands'}
+            </div>
           </div>
         </div>
       </section>
@@ -295,16 +303,18 @@ export const GuardGateView: React.FC<GuardGateViewProps> = ({
               No employees in roster yet
             </p>
             <p className="mx-auto mt-1.5 max-w-md text-sm text-slate-500">
-              Admin needs to add employees in the protected Admin Panel before guard check-in can begin.
+              Admin needs to add active employees before guard check-in can begin.
             </p>
-            <button
-              type="button"
-              onClick={onOpenAdminGate}
-              className="mt-5 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 whitespace-nowrap"
-            >
-              <Lock className="h-4 w-4" />
-              <span>Unlock Admin to Add Staff</span>
-            </button>
+            {isAdminMode && (
+              <button
+                type="button"
+                onClick={onOpenAdminGate}
+                className="mt-5 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 whitespace-nowrap"
+              >
+                <Lock className="h-4 w-4" />
+                <span>Go to Employees &amp; Guards</span>
+              </button>
+            )}
           </div>
         ) : filteredEmployees.length === 0 ? (
           <div className="px-6 py-12 text-center text-sm text-slate-500">

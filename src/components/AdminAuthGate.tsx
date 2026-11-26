@@ -29,7 +29,7 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
               {isLockedBySession ? 'Admin Panel Locked' : 'Admin Sign-In Required'}
             </h2>
             <p className="mt-1 text-xs leading-relaxed text-slate-500">
-              Guard Gate Desk remains open for attendance marking. Sign in with an authorized company Google account to manage employees, review attendance logs, and sync Google Sheets.
+              Guard Gate Desk is protected by Guard username and password credentials. Sign in with an authorized company Google account to manage employees, guard logins, attendance logs, and Google Sheets.
             </p>
           </div>
         </div>

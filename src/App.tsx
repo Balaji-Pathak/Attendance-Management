@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileSpreadsheet,
   Lock,
+  LogOut,
   Menu,
   ShieldCheck,
   Unlock,
@@ -24,6 +25,8 @@ import {
   DriveSpreadsheetItem,
   Employee,
   GateEmployeeView,
+  GuardAccount,
+  GuardSession,
   NavSection,
 } from './types/attendance';
 import {
@@ -49,22 +52,29 @@ import {
   adminBackfillEmployeeCompanyCategories,
   adminDeleteAttendance,
   adminDeleteEmployee,
+  adminDeleteGuardAccount,
   adminImportFromSheet,
   adminLoadStarterEmployees,
   adminMarkRecordsSynced,
   adminRemoveEmail,
   adminSaveBulkAttendance,
   adminSaveEmployee,
+  adminSaveGuardAccount,
   adminSaveSheetConfig,
+  adminToggleGuardActive,
   adminUpdateAttendance,
   guardMarkIn,
   guardMarkOut,
   guardPauseTiming,
   guardResumeTiming,
+  guardSignIn,
+  guardSignOut,
+  SaveGuardAccountInput,
   subscribeActiveEmployees,
   subscribeAdminEmails,
   subscribeAllAttendance,
   subscribeAllEmployees,
+  subscribeGuardAccounts,
   subscribeTodayAttendance,
   subscribeWorkspaceSettings,
 } from './services/firestoreService';
@@ -83,6 +93,7 @@ import {
 } from './services/googleSheets';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { AdminAuthGate } from './components/AdminAuthGate';
+import { GuardAuthGate } from './components/GuardAuthGate';
 import { GuardGateView } from './components/GuardGateView';
 import { MasterAttendanceView } from './components/MasterAttendanceView';
 import { IndividualEmployeeView } from './components/IndividualEmployeeView';
@@ -123,7 +134,10 @@ export default function App() {
   const [hasGoogleToken, setHasGoogleToken] = useState<boolean>(false);
   const [isLoggingInGoogle, setIsLoggingInGoogle] = useState<boolean>(false);
 
-  // Public Guard state (Firestore live subscriptions — no login required)
+  // Guard credential session (strictly in-memory; never stored in localStorage)
+  const [guardSession, setGuardSession] = useState<GuardSession | null>(null);
+
+  // Guard Gate Desk state (only subscribed when Guard or Admin is authenticated)
   const [todayDate, setTodayDate] = useState<string>(() => getTodayISO());
   const [gateEmployees, setGateEmployees] = useState<GateEmployeeView[]>([]);
   const [todayRecords, setTodayRecords] = useState<AttendanceRecord[]>([]);
@@ -131,6 +145,7 @@ export default function App() {
   // Protected Admin state (Firestore live subscriptions — only when Admin unlocked)
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [guardAccounts, setGuardAccounts] = useState<GuardAccount[]>([]);
   const [sheetConfigs, setSheetConfigs] = useState<CategorySheetConfigs>(EMPTY_SHEET_CONFIGS);
   const [adminEmails, setAdminEmails] = useState<AdminEmailEntry[]>([]);
   const [driveFiles, setDriveFiles] = useState<DriveSpreadsheetItem[]>([]);
@@ -142,17 +157,26 @@ export default function App() {
   const backfilledEmpIdsRef = useRef<Set<string>>(new Set());
 
   const isAdminUnlocked = Boolean(googleUser && isAdminAuthorized && !isLockedBySession);
+  const isGuardUnlocked = Boolean(guardSession && guardSession.expiresAtMs > Date.now());
+  const canAccessGuardDesk = isAdminUnlocked || isGuardUnlocked;
 
-  // Keep todayDate accurate if a gate tablet stays open past midnight
+  // Keep todayDate accurate and expire stale guard sessions automatically
   useEffect(() => {
     const timer = setInterval(() => {
       const current = getTodayISO();
       if (current !== todayDate) {
         setTodayDate(current);
       }
+      if (guardSession && guardSession.expiresAtMs <= Date.now()) {
+        setGuardSession(null);
+        setNotice({
+          type: 'info',
+          message: 'Guard login session expired. Please sign in again.',
+        });
+      }
     }, 30000);
     return () => clearInterval(timer);
-  }, [todayDate]);
+  }, [todayDate, guardSession]);
 
   // Listen to Firebase Auth state
   useEffect(() => {
@@ -170,8 +194,28 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Public Guard Firestore listeners (active employees + today's attendance)
+  // Clamp Guard users strictly to Guard Gate Desk tab
   useEffect(() => {
+    if (isGuardUnlocked && !isAdminUnlocked && activeNav !== 'guard-gate') {
+      setActiveNav('guard-gate');
+    }
+  }, [isGuardUnlocked, isAdminUnlocked, activeNav]);
+
+  // Clear guard session when Admin unlocks
+  useEffect(() => {
+    if (isAdminUnlocked && guardSession) {
+      guardSignOut(guardSession.sessionId).catch(() => {});
+      setGuardSession(null);
+    }
+  }, [isAdminUnlocked, guardSession]);
+
+  // Guard Gate Desk Firestore listeners (only attached after Guard or Admin login)
+  useEffect(() => {
+    if (!canAccessGuardDesk) {
+      setGateEmployees([]);
+      setTodayRecords([]);
+      return;
+    }
     const unsubEmps = subscribeActiveEmployees(
       (list) => setGateEmployees(list),
       (err) => {
@@ -189,13 +233,14 @@ export default function App() {
       unsubEmps();
       unsubToday();
     };
-  }, [todayDate]);
+  }, [todayDate, canAccessGuardDesk]);
 
   // Protected Admin Firestore listeners (only attached when Admin is unlocked)
   useEffect(() => {
     if (!isAdminUnlocked) {
       setEmployees([]);
       setRecords([]);
+      setGuardAccounts([]);
       setSheetConfigs(EMPTY_SHEET_CONFIGS);
       setAdminEmails([]);
       return;
@@ -218,6 +263,10 @@ export default function App() {
       (list) => setRecords(list),
       (err) => setNotice({ type: 'error', message: err.message })
     );
+    const unsubGuards = subscribeGuardAccounts(
+      (list) => setGuardAccounts(list),
+      (err) => setNotice({ type: 'error', message: err.message })
+    );
     const unsubSettings = subscribeWorkspaceSettings(
       (cfgs) => setSheetConfigs(cfgs),
       (err) => setNotice({ type: 'error', message: err.message })
@@ -230,6 +279,7 @@ export default function App() {
     return () => {
       unsubEmps();
       unsubAtt();
+      unsubGuards();
       unsubSettings();
       unsubAdmins();
     };
@@ -270,30 +320,76 @@ export default function App() {
   );
 
   // ============================================================================
-  // GUARD ACTIONS (No login required, live time + 30m break enforced)
+  // GUARD AUTH & GATE ACTIONS (Requires Guard or Admin login)
   // ============================================================================
+  const handleGuardLogin = async (username: string, password: string) => {
+    const session = await guardSignIn(username, password);
+    setGuardSession(session);
+    setActiveNav('guard-gate');
+    setNotice({
+      type: 'success',
+      message: `Signed in to Guard Gate Desk as @${session.username}.`,
+    });
+  };
+
+  const handleGuardLogout = async () => {
+    const activeSid = guardSession?.sessionId;
+    setGuardSession(null);
+    setGateEmployees([]);
+    setTodayRecords([]);
+    setActiveNav('guard-gate');
+    if (activeSid) {
+      await guardSignOut(activeSid);
+    }
+    setNotice({
+      type: 'info',
+      message: 'Signed out of Guard Gate Desk.',
+    });
+  };
+
+  const handleGuardPermissionCheck = (err: unknown, fallbackMessage: string) => {
+    const msg = (err as Error)?.message || fallbackMessage;
+    if (
+      !isAdminUnlocked &&
+      (msg.includes('Missing or insufficient permissions') ||
+        msg.includes('permission-denied'))
+    ) {
+      setGuardSession(null);
+      setNotice({
+        type: 'error',
+        message: 'Your guard session is inactive or was disabled by Admin. Please sign in again.',
+      });
+      return;
+    }
+    setNotice({
+      type: 'error',
+      message: msg,
+    });
+  };
+
+  const activeGuardSessionForWrite = isAdminUnlocked ? null : guardSession;
+
   const handleGuardMarkIn = async (empId: string) => {
+    if (!canAccessGuardDesk) return;
     const emp = gateEmployees.find((e) => e.id === empId);
     if (!emp) return;
     try {
-      const created = await guardMarkIn(emp);
+      const created = await guardMarkIn(emp, activeGuardSessionForWrite);
       setNotice({
         type: 'success',
         message: `Marked IN: ${created.empName} at ${created.inTime}.`,
       });
     } catch (err) {
-      setNotice({
-        type: 'error',
-        message: (err as Error).message || 'Could not mark check-in.',
-      });
+      handleGuardPermissionCheck(err, 'Could not mark check-in.');
     }
   };
 
   const handleGuardMarkOut = async (recordId: string) => {
+    if (!canAccessGuardDesk) return;
     const rec = todayRecords.find((r) => r.id === recordId);
     if (!rec) return;
     try {
-      const updated = await guardMarkOut(rec);
+      const updated = await guardMarkOut(rec, activeGuardSessionForWrite);
       const otPart =
         updated.overtimeDecimalHours && updated.overtimeDecimalHours > 0
           ? `, +${updated.overtimeDecimalHours.toFixed(2)}h OT`
@@ -303,14 +399,12 @@ export default function App() {
         message: `Marked OUT: ${updated.empName} (${updated.netDecimalHours?.toFixed(2)}h net${otPart}).`,
       });
     } catch (err) {
-      setNotice({
-        type: 'error',
-        message: (err as Error).message || 'Could not mark check-out.',
-      });
+      handleGuardPermissionCheck(err, 'Could not mark check-out.');
     }
   };
 
   const handleGuardPauseTiming = async (recordId: string) => {
+    if (!canAccessGuardDesk) return;
     const rec = todayRecords.find((r) => r.id === recordId);
     if (!rec || rec.isPaused) return;
     const optimisticPausedAt = Date.now();
@@ -320,7 +414,7 @@ export default function App() {
       )
     );
     try {
-      const updated = await guardPauseTiming(rec);
+      const updated = await guardPauseTiming(rec, activeGuardSessionForWrite);
       setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? updated : r)));
       setNotice({
         type: 'info',
@@ -328,28 +422,23 @@ export default function App() {
       });
     } catch (err) {
       setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? rec : r)));
-      setNotice({
-        type: 'error',
-        message: (err as Error).message || 'Could not pause working timer.',
-      });
+      handleGuardPermissionCheck(err, 'Could not pause working timer.');
     }
   };
 
   const handleGuardResumeTiming = async (recordId: string) => {
+    if (!canAccessGuardDesk) return;
     const rec = todayRecords.find((r) => r.id === recordId);
     if (!rec || !rec.isPaused) return;
     try {
-      const updated = await guardResumeTiming(rec);
+      const updated = await guardResumeTiming(rec, activeGuardSessionForWrite);
       setTodayRecords((prev) => prev.map((r) => (r.id === recordId ? updated : r)));
       setNotice({
         type: 'success',
         message: `Resumed working timer for ${updated.empName}.`,
       });
     } catch (err) {
-      setNotice({
-        type: 'error',
-        message: (err as Error).message || 'Could not resume working timer.',
-      });
+      handleGuardPermissionCheck(err, 'Could not resume working timer.');
     }
   };
 
@@ -1892,8 +1981,51 @@ export default function App() {
     }
   };
 
-  const currentNavItem = NAV_ITEMS.find((n) => n.id === activeNav) ?? NAV_ITEMS[0];
-  const requiresAdminGate = currentNavItem.adminOnly && !isAdminUnlocked;
+  const handleSaveGuardAccount = async (input: SaveGuardAccountInput) => {
+    await adminSaveGuardAccount(input);
+    setNotice({
+      type: 'success',
+      message: input.isNew
+        ? `Created Guard login "${input.username}".`
+        : `Updated Guard login "${input.username}".`,
+    });
+  };
+
+  const handleToggleGuardActive = async (guard: GuardAccount) => {
+    await adminToggleGuardActive(guard);
+    setNotice({
+      type: 'info',
+      message: guard.active
+        ? `Deactivated Guard "${guard.username}". Active sessions for this guard are now blocked.`
+        : `Activated Guard "${guard.username}".`,
+    });
+  };
+
+  const handleDeleteGuardAccount = (guard: GuardAccount) => {
+    setConfirmRequest({
+      title: `Delete Guard Login "${guard.username}"?`,
+      description: `Permanently delete guard credential "${guard.username}" (${guard.displayName}). This guard will immediately lose access to Guard Gate Desk.`,
+      affectedTarget: guard.username,
+      confirmLabel: 'Delete Guard',
+      destructive: true,
+      onConfirm: async () => {
+        await adminDeleteGuardAccount(guard.id);
+        setNotice({
+          type: 'info',
+          message: `Deleted Guard login "${guard.username}".`,
+        });
+      },
+    });
+  };
+
+  const isGuardOnlySession = isGuardUnlocked && !isAdminUnlocked;
+  const visibleNavItems = isGuardOnlySession
+    ? NAV_ITEMS.filter((item) => !item.adminOnly)
+    : NAV_ITEMS;
+  const currentNavItem =
+    visibleNavItems.find((n) => n.id === activeNav) ?? visibleNavItems[0];
+  const requiresAdminGate =
+    !isGuardOnlySession && currentNavItem.adminOnly && !isAdminUnlocked;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -1906,7 +2038,7 @@ export default function App() {
         </div>
 
         <nav className="flex-1 space-y-1 px-3 py-4" aria-label="Primary Navigation">
-          {NAV_ITEMS.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const active = activeNav === item.id;
             const locked = item.adminOnly && !isAdminUnlocked;
@@ -1941,9 +2073,17 @@ export default function App() {
 
         <div className="border-t border-slate-200 p-4 text-xs text-slate-500 space-y-1">
           <div className="font-medium text-slate-700">
-            {isAdminUnlocked ? 'Admin Mode Active' : 'Guard Mode (Open)'}
+            {isAdminUnlocked
+              ? 'Admin Mode Active'
+              : isGuardOnlySession
+              ? `Guard: @${guardSession?.username}`
+              : 'Login Required'}
           </div>
-          <div>30m break deducted for 4.5h+ shifts</div>
+          <div>
+            {isGuardOnlySession
+              ? 'Guard Gate Desk access only'
+              : '30m break deducted for 4.5h+ shifts'}
+          </div>
         </div>
       </aside>
 
@@ -1969,7 +2109,7 @@ export default function App() {
               </button>
             </div>
             <nav className="flex-1 space-y-1 px-3 py-4">
-              {NAV_ITEMS.map((item) => {
+              {visibleNavItems.map((item) => {
                 const Icon = item.icon;
                 const active = activeNav === item.id;
                 const locked = item.adminOnly && !isAdminUnlocked;
@@ -2058,6 +2198,21 @@ export default function App() {
                   <span>Lock Admin</span>
                 </button>
               </>
+            ) : isGuardOnlySession ? (
+              <>
+                <span className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-3 py-1.5 font-mono text-xs font-medium text-teal-900 whitespace-nowrap">
+                  <ShieldCheck className="h-3.5 w-3.5 text-teal-700" />
+                  <span>@{guardSession?.username}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleGuardLogout}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Guard Sign Out</span>
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -2101,18 +2256,26 @@ export default function App() {
             </div>
           )}
 
-          {activeNav === 'guard-gate' && (
-            <GuardGateView
-              employees={gateEmployees}
-              todayRecords={todayRecords}
-              serverDate={todayDate}
-              onMarkIn={handleGuardMarkIn}
-              onPauseTiming={handleGuardPauseTiming}
-              onResumeTiming={handleGuardResumeTiming}
-              onMarkOut={handleGuardMarkOut}
-              onOpenAdminGate={() => setActiveNav('employees')}
-            />
-          )}
+          {activeNav === 'guard-gate' &&
+            (canAccessGuardDesk ? (
+              <GuardGateView
+                employees={gateEmployees}
+                todayRecords={todayRecords}
+                serverDate={todayDate}
+                isAdminMode={isAdminUnlocked}
+                guardUsername={isGuardOnlySession ? guardSession?.username ?? null : null}
+                onMarkIn={handleGuardMarkIn}
+                onPauseTiming={handleGuardPauseTiming}
+                onResumeTiming={handleGuardResumeTiming}
+                onMarkOut={handleGuardMarkOut}
+                onOpenAdminGate={() => setActiveNav('employees')}
+              />
+            ) : (
+              <GuardAuthGate
+                onGuardLogin={handleGuardLogin}
+                onSwitchToAdminLogin={() => setActiveNav('master-log')}
+              />
+            ))}
 
           {requiresAdminGate && (
             <AdminAuthGate
@@ -2155,6 +2318,8 @@ export default function App() {
           {isAdminUnlocked && activeNav === 'employees' && (
             <EmployeesView
               employees={employees}
+              guardAccounts={guardAccounts}
+              adminEmail={googleUser?.email || PRIMARY_ADMIN_EMAIL}
               hasConnectedSheets={Boolean(
                 sheetConfigs['Sukhsa Export Permanent'] ||
                   sheetConfigs['Sukhsa Export Temporary'] ||
@@ -2166,6 +2331,9 @@ export default function App() {
               onDeleteEmployee={handleDeleteEmployee}
               onLoadStarterRoster={handleLoadStarterRoster}
               onRequestUpdateAllSheets={handleRequestUpdateAllSheets}
+              onSaveGuardAccount={handleSaveGuardAccount}
+              onToggleGuardActive={handleToggleGuardActive}
+              onDeleteGuardAccount={handleDeleteGuardAccount}
             />
           )}
 

@@ -10,6 +10,18 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidGuardId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 40 && id.matches('^[a-z0-9_\\-]+$');
+    }
+
+    function isValidGuardDisplayUsername(username) {
+      return username is string && username.size() >= 3 && username.size() <= 40 && username.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidHex(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen && val.matches('^[a-f0-9]+$');
+    }
+
     function isValidEmailId(email) {
       return email is string
         && email.size() >= 5
@@ -37,6 +49,18 @@ service cloud.firestore {
           || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           || exists(/databases/$(database)/documents/admin_emails/$(request.auth.token.email.lower()))
         );
+    }
+
+    function isValidActiveGuardSession(sessionId, guardUsername) {
+      return isValidId(sessionId)
+        && sessionId.size() >= 16
+        && isValidGuardId(guardUsername)
+        && exists(/databases/$(database)/documents/guard_sessions/$(sessionId))
+        && get(/databases/$(database)/documents/guard_sessions/$(sessionId)).data.active == true
+        && get(/databases/$(database)/documents/guard_sessions/$(sessionId)).data.guardUsername == guardUsername
+        && get(/databases/$(database)/documents/guard_sessions/$(sessionId)).data.expiresAtMs > request.time.toMillis()
+        && exists(/databases/$(database)/documents/guards/$(guardUsername))
+        && get(/databases/$(database)/documents/guards/$(guardUsername)).data.active == true;
     }
 
     function isValidEmployee(data) {
@@ -115,6 +139,8 @@ service cloud.firestore {
           'isSunday',
           'status',
           'syncedToSheet',
+          'guardSessionId',
+          'markedByGuard',
           'createdAt',
           'updatedAt'
         ])
@@ -142,6 +168,8 @@ service cloud.firestore {
         && data.isSunday is bool
         && data.status in ['on_duty', 'completed', 'short_shift']
         && data.syncedToSheet is bool
+        && (!('guardSessionId' in data) || (isValidId(data.guardSessionId) && data.guardSessionId.size() >= 16))
+        && (!('markedByGuard' in data) || isValidGuardId(data.markedByGuard))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -183,6 +211,60 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidGuardAccount(data) {
+      return data.keys().hasAll([
+          'id',
+          'username',
+          'displayName',
+          'role',
+          'passwordHash',
+          'active',
+          'createdBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'username',
+          'displayName',
+          'role',
+          'passwordHash',
+          'active',
+          'createdBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidGuardId(data.id)
+        && isValidGuardDisplayUsername(data.username)
+        && data.username.lower() == data.id
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.role == 'guard'
+        && isValidHex(data.passwordHash, 64, 128)
+        && data.active is bool
+        && data.createdBy is string && data.createdBy.size() >= 3 && data.createdBy.size() <= 120
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGuardSalt(data) {
+      return data.keys().hasAll(['id', 'salt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'salt', 'updatedAt'])
+        && isValidGuardId(data.id)
+        && isValidHex(data.salt, 16, 64)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGuardSession(data) {
+      return data.keys().hasAll(['id', 'guardUsername', 'authProof', 'active', 'expiresAtMs', 'createdAt'])
+        && data.keys().hasOnly(['id', 'guardUsername', 'authProof', 'active', 'expiresAtMs', 'createdAt'])
+        && isValidId(data.id) && data.id.size() >= 16
+        && isValidGuardId(data.guardUsername)
+        && isValidHex(data.authProof, 64, 128)
+        && data.active is bool
+        && data.expiresAtMs is int && data.expiresAtMs > 0
+        && data.createdAt is timestamp;
+    }
+
     match /employees/{empId} {
       allow get: if isValidId(empId) && (isAdmin() || existing().active == true);
       allow list: if isAdmin() || resource.data.active == true;
@@ -203,7 +285,10 @@ service cloud.firestore {
         && (
           isAdmin()
           || (
-            recordId == incoming().date + '_' + incoming().empId
+            'guardSessionId' in incoming()
+            && 'markedByGuard' in incoming()
+            && isValidActiveGuardSession(incoming().guardSessionId, incoming().markedByGuard)
+            && recordId == incoming().date + '_' + incoming().empId
             && get(/databases/$(database)/documents/employees/$(incoming().empId)).data.active == true
             && incoming().status == 'on_duty'
             && incoming().outTime == null
@@ -228,7 +313,10 @@ service cloud.firestore {
         && (
           isAdmin()
           || (
-            existing().status == 'on_duty'
+            'guardSessionId' in incoming()
+            && 'markedByGuard' in incoming()
+            && isValidActiveGuardSession(incoming().guardSessionId, incoming().markedByGuard)
+            && existing().status == 'on_duty'
             && existing().outTime == null
             && incoming().date == existing().date
             && incoming().empId == existing().empId
@@ -254,6 +342,8 @@ service cloud.firestore {
                   'isSunday',
                   'overtimeMinutes',
                   'overtimeDecimalHours',
+                  'guardSessionId',
+                  'markedByGuard',
                   'updatedAt'
                 ])
               )
@@ -273,6 +363,8 @@ service cloud.firestore {
                   'isSunday',
                   'overtimeMinutes',
                   'overtimeDecimalHours',
+                  'guardSessionId',
+                  'markedByGuard',
                   'updatedAt'
                 ])
               )
@@ -306,6 +398,8 @@ service cloud.firestore {
                   'isSunday',
                   'status',
                   'syncedToSheet',
+                  'guardSessionId',
+                  'markedByGuard',
                   'updatedAt'
                 ])
               )
@@ -345,6 +439,59 @@ service cloud.firestore {
         && incoming().email == email
         && incoming().createdAt == request.time;
       allow delete: if isAdmin() && isValidEmailId(email);
+    }
+
+    match /guards/{guardId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidGuardId(guardId)
+        && isValidGuardAccount(incoming())
+        && incoming().id == guardId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidGuardId(guardId)
+        && isValidGuardAccount(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidGuardId(guardId);
+    }
+
+    match /guard_salts/{guardId} {
+      allow get: if isValidGuardId(guardId);
+      allow list: if false;
+      allow create, update: if isAdmin()
+        && isValidGuardId(guardId)
+        && isValidGuardSalt(incoming())
+        && incoming().id == guardId
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidGuardId(guardId);
+    }
+
+    match /guard_sessions/{sessionId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(sessionId)
+        && sessionId.size() >= 16
+        && isValidGuardSession(incoming())
+        && incoming().id == sessionId
+        && incoming().active == true
+        && incoming().createdAt == request.time
+        && incoming().expiresAtMs > request.time.toMillis()
+        && exists(/databases/$(database)/documents/guards/$(incoming().guardUsername))
+        && get(/databases/$(database)/documents/guards/$(incoming().guardUsername)).data.active == true
+        && incoming().authProof == get(/databases/$(database)/documents/guards/$(incoming().guardUsername)).data.passwordHash;
+      allow update: if isValidId(sessionId)
+        && sessionId.size() >= 16
+        && isValidGuardSession(incoming())
+        && incoming().id == existing().id
+        && incoming().guardUsername == existing().guardUsername
+        && incoming().authProof == existing().authProof
+        && incoming().createdAt == existing().createdAt
+        && incoming().expiresAtMs == existing().expiresAtMs
+        && incoming().diff(existing()).affectedKeys().hasOnly(['active'])
+        && (isAdmin() || incoming().active == false);
+      allow delete: if isAdmin() && isValidId(sessionId);
     }
   }
 }
